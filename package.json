@@ -1,0 +1,53 @@
+{
+  "name": "ep_tables5",
+  "version": "0.2.0",
+  "description": "etherpad table plugin",
+  "author": {
+    "name": "cuishijie",
+    "email": "1839333350@qq.com",
+    "github": "https://github.com/csj5588"
+  },
+  "contributors": [
+    ""
+  ],
+  "license": "MIT",
+  "keywords": [
+    "etherpad",
+    "plugin",
+    "ep"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/csj5588/ep_tables5.git"
+  },
+  "bugs": {
+    "url": "https://github.com/csj5588/ep_tables5/issues"
+  },
+  "homepage": "https://github.com/csj5588/ep_tables5/README.md",
+  "funding": {
+    "type": "individual",
+    "url": "https://etherpad.org/"
+  },
+  "devDependencies": {
+    "eslint": "^7.18.0",
+    "eslint-config-etherpad": "^1.0.24",
+    "eslint-plugin-eslint-comments": "^3.2.0",
+    "eslint-plugin-mocha": "^8.0.0",
+    "eslint-plugin-node": "^11.1.0",
+    "eslint-plugin-prefer-arrow": "^1.2.3",
+    "eslint-plugin-promise": "^4.2.1",
+    "eslint-plugin-you-dont-need-lodash-underscore": "^6.10.0"
+  },
+  "eslintConfig": {
+    "root": true,
+    "extends": "etherpad/plugin"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix ."
+  },
+  "engines": {
+    "node": ">= 10.13.0"
+  },
+  "gitHead": "76641032dedc317ca62ef5e6f101f1c7fc92a37d"
+}

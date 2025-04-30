@@ -1,0 +1,90 @@
+/*
+ * CSS rules specifically for styling tables within the Etherpad editor iframe.
+ */
+
+/* Prevent default background highlight on the TD itself if an author class is present */
+.dataTable td[class*="author-"] { 
+    background-color: transparent !important; 
+    border: 1px solid transparent; /* Maintain border for consistency if needed */
+}
+
+/* Ensure the author span (added by acePostWriteDomLineHTML) displays correctly */
+.dataTable td span[data-author-span="true"] { 
+    display: inline; 
+    text-decoration: none !important; /* Remove potential underlines */
+    /* Text color should ideally be inherited or applied dynamically if Etherpad supports it, 
+       otherwise, it might need to be handled explicitly in acePostWriteDomLineHTML if this CSS isn't sufficient.
+       The aceSetAuthorStyle hook returning true aims to stop the default background color, 
+       allowing text color styling (potentially handled by core etherpad based on author class) to take precedence. */
+} 
+
+/* NEW STYLES FOR ATTRIBUTE-BASED TABLES */
+
+/* Applied directly to the rendered table */
+.dataTable {
+  width: 100%; /* Ensure table takes full width */
+  border-collapse: collapse; /* Collapse borders */
+  table-layout: fixed; /* Ensure equal column widths unless specified */
+  /* margin-bottom: 1px; */ /* REMOVED - Likely caused gaps between rows */
+  border: 1px solid black; /* Apply border to the table itself */
+  border-top: none; /* REMOVE top border to prevent double lines between rows */
+}
+
+/* Restore top border ONLY for the first table row in a block */
+.dataTable.dataTable-first-row {
+  border-top: 1px solid black;
+}
+
+/* Style the table rows */
+.dataTable tr {
+  height: 36px; /* Set fixed row height */
+  min-height: 36px; /* Ensure minimum row height */
+}
+
+.dataTable td {
+  /* border: 1px solid black !important; */ /* REMOVED - Moved to .dataTable */
+  /* min-height: 36px; */ /* REMOVED - Moved to .dataTable tr */
+  vertical-align: top; /* Align content to top */
+  word-wrap: break-word; /* Wrap long words */
+  /* Padding will be kept inline via JS for now */
+  /* Add internal cell borders if desired (looks better with collapsed borders) */
+  border-left: 1px solid black;
+  border-right: 1px solid black;
+}
+
+/* Remove outer border from first/last cells if table border is set */
+.dataTable td:first-child {
+  border-left: none;
+}
+.dataTable td:last-child {
+  border-right: none;
+}
+
+/* Style the line DIV as a table row */
+/* Commenting out previous attempt as block/inline-block above is simpler for now
+.ep-table-row {
+  display: table-row !important; 
+  width: 100%; 
+}
+*/
+
+/* Style the cell wrapper spans as table cells */
+/* Commenting out previous attempt
+.ep-table-cell {
+  display: table-cell !important; 
+  padding: 2px 4px; 
+  border: 1px solid #ccc; 
+  vertical-align: inherit; 
+  height: auto; 
+}
+*/
+
+/* Ensure delimiters themselves are not visible */
+.table-cell-delimiter {
+  display: none !important;
+}
+
+.ep-table-row-line > .list-bullet,
+.list-table-row     > .list-bullet {
+  display: none !important;
+} 

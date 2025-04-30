@@ -1,0 +1,16 @@
+<script src="../static/plugins/ep_tables5/static/js/datatables-renderer.js"></script>
+<script type="text/javascript">
+  // Ensure DatatablesRenderer is available globally
+  if (typeof window.DatatablesRenderer === 'undefined') {
+    window.DatatablesRenderer = DatatablesRenderer;
+  }
+  
+  // Access the Changeset object properly from Etherpad's existing references
+  // We need to avoid setting it to an empty object which would break functionality
+  // Changeset should remain whatever Etherpad has already defined it as
+  
+  // Create a global Datatables variable if it doesn't exist
+  if (typeof window.Datatables === 'undefined' && typeof Datatables !== 'undefined') {
+    window.Datatables = Datatables;
+  }
+</script>

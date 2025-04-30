@@ -1,0 +1,51 @@
+<li class="separator acl-write"></li>
+
+<li id="table-menu-button" class="acl-write">
+  <!-- just a button, no nested <a> -->
+  <button title="Table"
+          class="buttonicon buttonicon-table"
+          aria-haspopup="true"
+          aria-expanded="false"></button>
+</li>
+
+<!-- context menu -->
+<nav id="table-context-menu" class="table-context-menu" role="menu">
+  <ul role="none">
+    <li class="menu-item" id="tbl_prop_create_table" role="menuitem">
+      <a href="#create-table-container" data-l10n-id="ep_tables5.menuCreateTable">Insert Table</a>
+    </li>
+  </ul>
+
+  <ul role="none">
+    <li class="menu-item" data-action="addTblRowA"><a href="#" data-l10n-id="ep_tables5.menuInsertRowAbove">Insert Row Above</a></li>
+    <li class="menu-item" data-action="addTblRowB"><a href="#" data-l10n-id="ep_tables5.menuInsertRowBelow">Insert Row Below</a></li>
+    <li class="menu-item" data-action="addTblColL"><a href="#" data-l10n-id="ep_tables5.menuInsertColumnLeft">Insert Column Left</a></li>
+    <li class="menu-item" data-action="addTblColR"><a href="#" data-l10n-id="ep_tables5.menuInsertColumnRight">Insert Column Right</a></li>
+  </ul>
+
+  <ul role="none">
+    <li class="menu-item" data-action="delTblRow"><a href="#" data-l10n-id="ep_tables5.menuDeleteRow">Delete Row</a></li>
+    <li class="menu-item" data-action="delTblCol"><a href="#" data-l10n-id="ep_tables5.menuDeleteColumn">Delete Column</a></li>
+    <li class="menu-item" data-action="delTbl"><a href="#" data-l10n-id="ep_tables5.menuDeleteTable">Delete Table</a></li>
+  </ul>
+
+  <ul role="none">
+    <li class="menu-item" id="tbl_prop_menu_hide"><a href="#" data-l10n-id="ep_tables5.menuCloseThisMenu">Close Menu</a></li>
+  </ul>
+
+  <!-- table-size chooser -->
+  <div id="create-table-container" class="table-context-menu">
+    <div id="new-table-size">1 X 1</div>
+    <table id="new-table-size-selector">
+      <tbody>
+        <% for (let i = 1; i <= 10; i++) { %>
+        <tr>
+          <% for (let j = 1; j <= 20; j++) { %>
+            <td tabindex="-1"></td>
+          <% } %>
+        </tr>
+        <% } %>
+      </tbody>
+    </table>
+  </div>
+</nav>
