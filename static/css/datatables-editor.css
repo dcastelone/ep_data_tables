@@ -88,3 +88,13 @@
 .list-table-row     > .list-bullet {
   display: none !important;
 } 
+
+/* Hide the injected delimiter span */
+.ep-tables5-delim {
+  font-size:0;
+  line-height:0;
+  color:transparent;
+  pointer-events:none;
+  user-select:none;
+  caret-color:transparent;
+} 

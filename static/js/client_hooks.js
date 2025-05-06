@@ -16,8 +16,8 @@
 const ATTR_TABLE_JSON = 'tbljson';
 const ATTR_CELL       = 'td';
 const log             = (...m) => console.debug('[ep_tables5:client_hooks]', ...m);
-const ZWSP            = '\u200B'; // Zero-Width Space - Keep for reference maybe, but not in delimiter
 const DELIMITER       = '|'; // SIMPLIFIED DELIMITER
+const HIDDEN_DELIM    = '|';        // Keep the real char for DOM alignment
 
 // helper for stable random ids
 const rand = () => Math.random().toString(36).slice(2, 8);
@@ -118,9 +118,19 @@ exports.collectContentPre = (hook, ctx) => {
   // Extract innerHTML from each TD in the rendered row
   const cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
     // Assuming buildTableFromDelimitedHTML placed content directly in TD
-    const segmentHTML = td.innerHTML || ''; // Get raw HTML content
+    let segmentHTML = td.innerHTML || ''; // Get raw HTML content
+    let cleanContent = segmentHTML;
+
+    // For cells after the first, remove the hidden delimiter span wrapper before joining
+    if (index > 0) {
+       // Regex to match the specific span structure at the beginning
+       const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|<\/span>/;
+       cleanContent = segmentHTML.replace(hiddenDelimRegex, '');
+    }
+
     log(`${funcName} (${node?.id}): Reading rendered TD #${index} innerHTML:`, segmentHTML);
-    return segmentHTML;
+    log(`${funcName} (${node?.id}): Cleaned segment content for cell ${index}:`, cleanContent);
+    return cleanContent;
   });
   log(`${funcName} (${node?.id}): Extracted HTML segments from TDs:`, cellHTMLSegments);
 
@@ -212,11 +222,14 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   // Map the HTML segments directly into TD elements
   // We trust that innerHTMLSegments contains valid, pre-rendered HTML snippets
   const cellsHtml = innerHTMLSegments.map((segment, index) => {
+    const hidden = index === 0 ? '' :
+      /* keep the char in the DOM but make it visually disappear */
+      `<span class="ep-tables5-delim">${HIDDEN_DELIM}</span>`;
     const cellContent = segment || '&nbsp;'; // Use non-breaking space for empty segments
     log(`${funcName}: Processing segment ${index}. Content:`, segment); // Log segment content
     // Wrap the raw segment HTML in a span for consistency? Or directly in TD? Let's try TD directly first.
     // Maybe add back table-cell-content span later if needed for styling/selection.
-    const tdContent = `<td style="${tdStyle}">${cellContent}</td>`;
+    const tdContent = `<td style="${tdStyle}">${hidden}${cellContent}</td>`;
     log(`${funcName}: Generated TD HTML for segment ${index}:`, tdContent);
     return tdContent;
   }).join('');
@@ -240,53 +253,48 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   const node = args?.node;
   const nodeId = node?.id;
   const lineNum = args?.lineNumber; // Etherpad >= 1.9 provides lineNumber
+  const logPrefix = '[ep_tables5:acePostWriteDomLineHTML]'; // Consistent prefix
 
   // *** STARTUP LOGGING ***
-  log(`${funcName}: ----- START ----- NodeID: ${nodeId} LineNum: ${lineNum}`);
+  log(`${logPrefix} ----- START ----- NodeID: ${nodeId} LineNum: ${lineNum}`);
   if (!node || !nodeId) {
-      log(`${funcName}: ERROR - Received invalid node or node without ID. Aborting.`);
+      log(`${logPrefix} ERROR - Received invalid node or node without ID. Aborting.`);
       console.error(`[ep_tables5] ${funcName}: Received invalid node or node without ID.`);
       return cb();
   }
-  log(`${funcName} NodeID#${nodeId}: Initial node outerHTML:`, node.outerHTML);
-  log(`${funcName} NodeID#${nodeId}: Full args object received:`, args);
+  // log(`${logPrefix} NodeID#${nodeId}: Initial node outerHTML:`, node.outerHTML); // Too verbose usually
+  // log(`${logPrefix} NodeID#${nodeId}: Full args object received:`, args); // Too verbose usually
   // ***********************
 
   let rowMetadata = null;
   let encodedJsonString = null;
 
   // --- Log node classes BEFORE searching --- 
-  log(`${funcName} NodeID#${nodeId}: Checking classes BEFORE search. Node classList:`, node.classList);
-  if (node.children) {
-      for (let i = 0; i < node.children.length; i++) {
-         log(`${funcName} NodeID#${nodeId}:   Child ${i} (${node.children[i].tagName}) classList:`, node.children[i].classList);
-      }
-  } else {
-       log(`${funcName} NodeID#${nodeId}: Node has no children.`);
-  }
+  // log(`${logPrefix} NodeID#${nodeId}: Checking classes BEFORE search. Node classList:`, node.classList);
+  // ... (child class logging removed for brevity) ...
   // --- End logging node classes ---
 
-  // --- 1. Find and Parse Metadata Attribute ---
-  log(`${funcName} NodeID#${nodeId}: Searching for tbljson-* class on node or children...`);
+  // --- 1. Find and Parse Metadata Attribute --- 
+  log(`${logPrefix} NodeID#${nodeId}: Searching for tbljson-* class...`);
   // Check the node itself first
   if (node.classList) {
       for (const cls of node.classList) { 
           if (cls.startsWith('tbljson-')) {
               encodedJsonString = cls.substring(8);
-              log(`${funcName} NodeID#${nodeId}: Found encoded tbljson on node itself: ${encodedJsonString}`);
+              log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson on node itself: ${encodedJsonString}`);
               break;
       }
   } 
   }
   // Check children if not found on node
   if (!encodedJsonString && node.children) {
-       log(`${funcName} NodeID#${nodeId}: Not found on node, checking children...`);
+       // log(`${logPrefix} NodeID#${nodeId}: Not found on node, checking children...`);
         for (const child of node.children) {
              if (child.classList) {
                 for (const cls of child.classList) {
                  if (cls.startsWith('tbljson-')) {
                      encodedJsonString = cls.substring(8);
-                     log(`${funcName} NodeID#${nodeId}: Found encoded tbljson on child ${child.tagName}: ${encodedJsonString}`);
+                     log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson on child ${child.tagName}: ${encodedJsonString}`);
                      break;
                  }
               }
@@ -295,40 +303,55 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       }
   } 
 
-  // If no attribute found, it's not a table line managed by us (or attribute is missing)
+  // If no attribute found, it's not a table line managed by us
   if (!encodedJsonString) {
-      log(`${funcName} NodeID#${nodeId}: No tbljson-* class found. Assuming not a table line for rendering. END.`);
+      log(`${logPrefix} NodeID#${nodeId}: No tbljson-* class found. Assuming not a table line. END.`);
       return cb(); 
   }
 
-  log(`${funcName} NodeID#${nodeId}: Decoding and parsing metadata...`);
+  // *** NEW CHECK: If table already rendered, skip regeneration ***
+  const existingTable = node.querySelector('table.dataTable[data-tblId]');
+  if (existingTable) {
+      log(`${logPrefix} NodeID#${nodeId}: Table already exists in DOM. Skipping innerHTML replacement.`);
+      // Optionally, verify tblId matches metadata? For now, assume it's correct.
+      // const existingTblId = existingTable.getAttribute('data-tblId');
+      // try {
+      //    const decoded = dec(encodedJsonString); 
+      //    const currentMetadata = JSON.parse(decoded);
+      //    if (existingTblId === currentMetadata?.tblId) { ... } 
+      // } catch(e) { /* ignore validation error */ }
+      return cb(); // Do nothing further
+  }
+  // *** END NEW CHECK ***
+
+  log(`${logPrefix} NodeID#${nodeId}: Decoding and parsing metadata...`);
   try { 
       const decoded = dec(encodedJsonString); 
-      log(`${funcName} NodeID#${nodeId}: Decoded string: ${decoded}`);
+      log(`${logPrefix} NodeID#${nodeId}: Decoded string: ${decoded}`);
       if (!decoded) throw new Error('Decoded string is null or empty.');
       rowMetadata = JSON.parse(decoded);
-      log(`${funcName} NodeID#${nodeId}: Parsed rowMetadata:`, rowMetadata);
+      log(`${logPrefix} NodeID#${nodeId}: Parsed rowMetadata:`, rowMetadata);
 
       // Validate essential metadata
       if (!rowMetadata || typeof rowMetadata.tblId === 'undefined' || typeof rowMetadata.row === 'undefined' || typeof rowMetadata.cols !== 'number') {
           throw new Error('Invalid or incomplete metadata (missing tblId, row, or cols).');
       }
-      log(`${funcName} NodeID#${nodeId}: Metadata validated successfully.`);
+      log(`${logPrefix} NodeID#${nodeId}: Metadata validated successfully.`);
 
   } catch(e) { 
-      log(`${funcName} NodeID#${nodeId}: FATAL ERROR - Failed to decode/parse/validate tbljson metadata. Rendering cannot proceed.`, e);
+      log(`${logPrefix} NodeID#${nodeId}: FATAL ERROR - Failed to decode/parse/validate tbljson metadata. Rendering cannot proceed.`, e);
       console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Failed to decode/parse/validate tbljson.`, encodedJsonString, e);
       // Optionally render an error state in the node?
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Invalid table metadata attribute found.</div>';
-      log(`${funcName} NodeID#${nodeId}: Rendered error message in node. END.`);
+      log(`${logPrefix} NodeID#${nodeId}: Rendered error message in node. END.`);
       return cb(); 
   }
   // --- End Metadata Parsing ---
 
   // --- 2. Get and Parse Line Content ---
   const lineInnerHTML = node.innerHTML;
-  log(`${funcName} NodeID#${nodeId}: Parsing line content via Placeholder Replace/Split...`);
-  log(`${funcName} NodeID#${nodeId}: Original node.innerHTML:`, lineInnerHTML);
+  log(`${logPrefix} NodeID#${nodeId}: Parsing line content via Placeholder Replace/Split...`);
+  log(`${logPrefix} NodeID#${nodeId}: Original node.innerHTML:`, lineInnerHTML);
 
   let htmlSegments = [];
   // Define a unique placeholder unlikely to be in content
@@ -339,41 +362,41 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       // Need to use a RegExp with the global flag for replaceAll behavior
       // Escape the pipe for RegExp: \|
       const replacedHtml = lineInnerHTML.replace(new RegExp('\\|', 'g'), PLACEHOLDER);
-      log(`${funcName} NodeID#${nodeId}: innerHTML after replacing delimiter ('|') with placeholder:`, replacedHtml);
+      log(`${logPrefix} NodeID#${nodeId}: innerHTML after replacing delimiter ('|') with placeholder:`, replacedHtml);
 
       // Split the string using the placeholder
       htmlSegments = replacedHtml.split(PLACEHOLDER);
-      log(`${funcName} NodeID#${nodeId}: Final parsed HTML segments (${htmlSegments.length}) after splitting by placeholder:`, htmlSegments);
+      log(`${logPrefix} NodeID#${nodeId}: Final parsed HTML segments (${htmlSegments.length}) after splitting by placeholder:`, htmlSegments);
 
       // --- Validation --- 
       if (htmlSegments.length !== rowMetadata.cols) {
-          log(`${funcName} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Table structure might be incorrect.`);
+          log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Table structure might be incorrect.`);
           console.warn(`[ep_tables5] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
       } else {
-          log(`${funcName} NodeID#${nodeId}: Parsed segment count matches metadata cols (${rowMetadata.cols}).`);
+          log(`${logPrefix} NodeID#${nodeId}: Parsed segment count matches metadata cols (${rowMetadata.cols}).`);
       }
   } catch (parseError) {
-      log(`${funcName} NodeID#${nodeId}: ERROR during placeholder replace/split parsing. Cannot build table.`, parseError);
+      log(`${logPrefix} NodeID#${nodeId}: ERROR during placeholder replace/split parsing. Cannot build table.`, parseError);
       console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error parsing line content via placeholder replace/split.`, parseError);
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Could not parse table cell content.</div>';
-      log(`${funcName} NodeID#${nodeId}: Rendered parse error message in node. END.`);
+      log(`${logPrefix} NodeID#${nodeId}: Rendered parse error message in node. END.`);
       return cb();
   }
   // --- End Content Parsing ---
 
   // --- 3. Build and Render Table ---
-  log(`${funcName} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
+  log(`${logPrefix} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
       try {
       const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, htmlSegments);
-      log(`${funcName} NodeID#${nodeId}: Received new table HTML from helper. Replacing node.innerHTML.`);
+      log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing node.innerHTML.`);
       // Replace the node's content entirely with the generated table
       node.innerHTML = newTableHTML;
-      log(`${funcName} NodeID#${nodeId}: Successfully replaced node.innerHTML with new table structure.`);
+      log(`${logPrefix} NodeID#${nodeId}: Successfully replaced node.innerHTML with new table structure.`);
       } catch (renderError) {
-      log(`${funcName} NodeID#${nodeId}: ERROR during table building or rendering.`, renderError);
+      log(`${logPrefix} NodeID#${nodeId}: ERROR during table building or rendering.`, renderError);
       console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error building/rendering table.`, renderError);
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Failed to render table structure.</div>';
-      log(`${funcName} NodeID#${nodeId}: Rendered build/render error message in node. END.`);
+      log(`${logPrefix} NodeID#${nodeId}: Rendered build/render error message in node. END.`);
       return cb();
   }
   // --- End Table Building ---
@@ -381,7 +404,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // *** REMOVED CACHING LOGIC ***
   // The old logic based on tableRowNodes cache is completely removed.
 
-  log(`${funcName}: ----- END ----- NodeID: ${nodeId}`);
+  log(`${logPrefix}: ----- END ----- NodeID: ${nodeId}`);
   return cb();
 };
 
@@ -406,305 +429,409 @@ exports.aceKeyEvent = (h, ctx) => {
   const docManager = ctx.documentAttributeManager;
 
   const startLogTime = Date.now();
-  log(`[CaretTrace] ${funcName}: START Key='${evt?.key}' Code=${evt?.keyCode} Type=${evt?.type} Modifiers={ctrl:${evt?.ctrlKey},alt:${evt?.altKey},meta:${evt?.metaKey},shift:${evt?.shiftKey}}`, { selStart: rep?.selStart, selEnd: rep?.selEnd });
+  const logPrefix = '[ep_tables5:aceKeyEvent]';
+  log(`${logPrefix} START Key='${evt?.key}' Code=${evt?.keyCode} Type=${evt?.type} Modifiers={ctrl:${evt?.ctrlKey},alt:${evt?.altKey},meta:${evt?.metaKey},shift:${evt?.shiftKey}}`, { selStart: rep?.selStart, selEnd: rep?.selEnd });
 
   if (!rep || !rep.selStart || !editorInfo || !evt || !docManager) {
-    log(`[CaretTrace] ${funcName}: Skipping - Missing critical context.`);
+    log(`${logPrefix} Skipping - Missing critical context.`);
     return false;
   }
 
-  const currentLineNum = rep.selStart[0];
-  const currentCol = rep.selStart[1]; // Absolute column in the line model
-  log(`[CaretTrace] ${funcName}: Caret Line=${currentLineNum}, Col=${currentCol}`);
+  // Get caret info from event context - may be stale
+  const reportedLineNum = rep.selStart[0];
+  const reportedCol = rep.selStart[1]; 
+  log(`${logPrefix} Reported caret from rep: Line=${reportedLineNum}, Col=${reportedCol}`);
 
-  // --- Check if the current line is a table line ---
-  let isTableLine = false;
+  // --- Get Table Metadata for the reported line --- 
   let tableMetadata = null;
+  let lineAttrString = null; // Store for potential use later
   try {
-    const lineAttrString = docManager.getAttributeOnLine(currentLineNum, ATTR_TABLE_JSON);
+    lineAttrString = docManager.getAttributeOnLine(reportedLineNum, ATTR_TABLE_JSON);
     if (lineAttrString) {
         tableMetadata = JSON.parse(lineAttrString);
-        if (tableMetadata && typeof tableMetadata.cols === 'number') {
-             isTableLine = true;
-             log(`[CaretTrace] ${funcName}: Current line IS a table line. Metadata:`, tableMetadata);
-        } else {
-             log(`[CaretTrace] ${funcName}: Line has attribute, but metadata invalid/missing cols.`);
+        if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+             log(`${logPrefix} Line ${reportedLineNum} has attribute, but metadata invalid/missing cols.`);
+             tableMetadata = null; // Ensure it's null if invalid
         }
     } else {
-        // log(`[CaretTrace] ${funcName}: Current line has no ${ATTR_TABLE_JSON} attribute.`);
+        // Not a table line based on reported caret line
     }
   } catch(e) {
-    console.error(`[ep_tables5] ${funcName}: Error checking/parsing line attribute.`, e);
+    console.error(`${logPrefix} Error checking/parsing line attribute for line ${reportedLineNum}.`, e);
+    tableMetadata = null; // Ensure it's null on error
   }
 
-  if (!isTableLine) {
-    log(`[CaretTrace] ${funcName}: Not a table line. Allowing default. END (Default)`);
-    return false; // Not our line, let Etherpad handle it
-  }
-  // --- End Table Line Check ---
+  // Get last known good state
+  const editor = editorInfo.editor; // Get editor instance
+  const lastClick = editor?.ep_tables5_last_clicked; // Read shared state
+  log(`${logPrefix} Reading stored click/caret info:`, lastClick);
 
-  // --- Determine Target Cell and Relative Caret Position ---
+  // --- Determine the TRUE target line, cell, and caret position --- 
+  let currentLineNum = -1;
   let targetCellIndex = -1;
   let relativeCaretPos = -1;
-  let precedingCellsOffset = 0; // Sum of lengths + delimiters before target cell
-  let cellStartCol = 0; // Absolute column where the target cell starts
+  let precedingCellsOffset = 0; 
+  let cellStartCol = 0; 
+  let lineText = '';
+  let cellTexts = [];
+  let metadataForTargetLine = null;
+  let trustedLastClick = false; // Flag to indicate if we are using stored info
 
-  const lineText = rep.lines.atIndex(currentLineNum)?.text || '';
-  log(`[CaretTrace] ${funcName}: Line text: "${lineText}"`);
-  const cellTexts = lineText.split(DELIMITER);
-  log(`[CaretTrace] ${funcName}: Split line into segments:`, cellTexts);
+  // ** Scenario 1: Try to trust lastClick info **
+  if (lastClick) {
+      log(`${logPrefix} Attempting to validate stored click info for Line=${lastClick.lineNum}...`);
+      let storedLineAttrString = null;
+      let storedLineMetadata = null;
+      try {
+          storedLineAttrString = docManager.getAttributeOnLine(lastClick.lineNum, ATTR_TABLE_JSON);
+          if (storedLineAttrString) storedLineMetadata = JSON.parse(storedLineAttrString);
+          
+          // Check if metadata is valid and tblId matches
+          if (storedLineMetadata && typeof storedLineMetadata.cols === 'number' && storedLineMetadata.tblId === lastClick.tblId) {
+              log(`${logPrefix} Stored click info VALIDATED (Metadata OK and tblId matches). Trusting stored state.`);
+              trustedLastClick = true;
+              currentLineNum = lastClick.lineNum; 
+              targetCellIndex = lastClick.cellIndex;
+              metadataForTargetLine = storedLineMetadata; 
+              lineAttrString = storedLineAttrString; // Use the validated attr string
+              
+              lineText = rep.lines.atIndex(currentLineNum)?.text || '';
+              cellTexts = lineText.split(DELIMITER);
+              log(`${logPrefix} Using Line=${currentLineNum}, CellIndex=${targetCellIndex}. Text: "${lineText}"`);
 
-  // Basic validation - ensure we have segments if it's a table line
-  if (cellTexts.length === 0 && lineText.length > 0) {
-       log(`[CaretTrace] ${funcName}: ERROR - Line identified as table but splitting text resulted in zero segments. Text: "${lineText}"`);
-       return false; // Avoid errors, let default (might break things)
-  }
-  // Ensure segment count matches metadata if possible
-  if (cellTexts.length !== tableMetadata.cols) {
-      log(`[CaretTrace] ${funcName}: WARNING - Cell text segment count (${cellTexts.length}) mismatch with metadata cols (${tableMetadata.cols}). Proceeding cautiously.`);
-      // Allow proceeding, but cell index calculation might be off
-  }
+              if (cellTexts.length !== metadataForTargetLine.cols) {
+                  log(`${logPrefix} WARNING: Stored cell count mismatch for trusted line ${currentLineNum}.`);
+              }
 
-  let currentOffset = 0;
-  for (let i = 0; i < cellTexts.length; i++) {
-      const cellLength = cellTexts[i].length;
-      const cellEndCol = currentOffset + cellLength;
-       log(`[CaretTrace] ${funcName}: Checking cell ${i}: Text="${cellTexts[i]}", Length=${cellLength}, StartsAt=${currentOffset}, EndsAt=${cellEndCol}`);
+              cellStartCol = 0;
+              for (let i = 0; i < targetCellIndex; i++) {
+                  cellStartCol += (cellTexts[i]?.length ?? 0) + DELIMITER.length;
+              }
+              precedingCellsOffset = cellStartCol;
+              log(`${logPrefix} Calculated cellStartCol=${cellStartCol} from trusted cellIndex=${targetCellIndex}.`);
 
-      // Check if caret is within this cell OR exactly at the start of the next cell (treat as end of current)
-      if (currentCol >= currentOffset && currentCol <= cellEndCol) {
-          targetCellIndex = i;
-          cellStartCol = currentOffset;
-          relativeCaretPos = currentCol - currentOffset;
-          precedingCellsOffset = currentOffset;
-          log(`[CaretTrace] ${funcName}: --> Caret is in Cell ${targetCellIndex} (StartsAt ${cellStartCol}). Relative Pos: ${relativeCaretPos}`);
-          break; // Found the cell
+              if (typeof lastClick.relativePos === 'number' && lastClick.relativePos >= 0) {
+                  const currentCellTextLength = cellTexts[targetCellIndex]?.length ?? 0;
+                  relativeCaretPos = Math.max(0, Math.min(lastClick.relativePos, currentCellTextLength));
+                  log(`${logPrefix} Using and validated stored relative position: ${relativeCaretPos}.`);
+  } else {
+                  relativeCaretPos = reportedCol - cellStartCol; // Use reportedCol for initial calc if relative is missing
+                  const currentCellTextLength = cellTexts[targetCellIndex]?.length ?? 0;
+                  relativeCaretPos = Math.max(0, Math.min(relativeCaretPos, currentCellTextLength)); 
+                  log(`${logPrefix} Stored relativePos missing, calculated from reportedCol (${reportedCol}): ${relativeCaretPos}`);
+              }
+          } else {
+              log(`${logPrefix} Stored click info INVALID (Metadata missing/invalid or tblId mismatch). Clearing stored state.`);
+              if (editor) editor.ep_tables5_last_clicked = null;
+          }
+      } catch (e) {
+           console.error(`${logPrefix} Error validating stored click info for line ${lastClick.lineNum}.`, e);
+           if (editor) editor.ep_tables5_last_clicked = null; // Clear on error
       }
-      // Move offset past the current cell and its delimiter
-      currentOffset += cellLength + DELIMITER.length;
   }
+  
+  // ** Scenario 2: Fallback - Use reported line/col ONLY if stored info wasn't trusted **
+  if (!trustedLastClick) {
+      log(`${logPrefix} Fallback: Using reported caret position Line=${reportedLineNum}, Col=${reportedCol}.`);
+      // Fetch metadata for the reported line again, in case it wasn't fetched or was invalid earlier
+      try {
+          lineAttrString = docManager.getAttributeOnLine(reportedLineNum, ATTR_TABLE_JSON);
+          if (lineAttrString) tableMetadata = JSON.parse(lineAttrString);
+          if (!tableMetadata || typeof tableMetadata.cols !== 'number') tableMetadata = null;
+      } catch(e) { tableMetadata = null; } // Ignore errors here, handled below
 
-  if (targetCellIndex === -1) {
-      if (currentCol === lineText.length && cellTexts.length > 0) {
-            targetCellIndex = cellTexts.length - 1;
-            cellStartCol = currentOffset - (cellTexts[targetCellIndex].length + DELIMITER.length); // Calculate start of last cell
-            relativeCaretPos = cellTexts[targetCellIndex].length; // Caret is at the end
-            precedingCellsOffset = cellStartCol;
-            log(`[CaretTrace] ${funcName}: --> Caret detected at END of last cell (${targetCellIndex}). Relative Pos: ${relativeCaretPos}`);
-      } else {
-        log(`[CaretTrace] ${funcName}: FAILED to determine target cell for caret col ${currentCol}. Aborting event handling.`);
-        return false; // Let default handle
+      if (!tableMetadata) {
+          log(`${logPrefix} Fallback: Reported line ${reportedLineNum} is not a valid table line. Allowing default.`);
+           return false;
       }
-  }
-  // --- End Cell/Position Calculation ---
+      
+      currentLineNum = reportedLineNum;
+      metadataForTargetLine = tableMetadata;
+      log(`${logPrefix} Fallback: Processing based on reported line ${currentLineNum}.`);
+      
+      lineText = rep.lines.atIndex(currentLineNum)?.text || '';
+      cellTexts = lineText.split(DELIMITER);
+      log(`${logPrefix} Fallback: Fetched text for reported line ${currentLineNum}: "${lineText}"`);
 
-  // --- Define Key Types --- 
+      if (cellTexts.length !== metadataForTargetLine.cols) {
+          log(`${logPrefix} WARNING (Fallback): Cell count mismatch for reported line ${currentLineNum}.`);
+      }
+
+      // Calculate target cell based on reportedCol
+      let currentOffset = 0;
+      let foundIndex = -1;
+      for (let i = 0; i < cellTexts.length; i++) {
+          const cellLength = cellTexts[i]?.length ?? 0;
+          const cellEndCol = currentOffset + cellLength;
+          if (reportedCol >= currentOffset && reportedCol <= cellEndCol) {
+              foundIndex = i;
+              relativeCaretPos = reportedCol - currentOffset;
+              cellStartCol = currentOffset;
+              precedingCellsOffset = cellStartCol;
+              log(`${logPrefix} --> (Fallback Calc) Found target cell ${foundIndex}. RelativePos: ${relativeCaretPos}.`);
+              break; 
+          }
+          if (i < cellTexts.length - 1 && reportedCol === cellEndCol + DELIMITER.length) {
+              foundIndex = i + 1;
+              relativeCaretPos = 0; 
+              cellStartCol = currentOffset + cellLength + DELIMITER.length;
+              precedingCellsOffset = cellStartCol;
+              log(`${logPrefix} --> (Fallback Calc) Caret at delimiter AFTER cell ${i}. Treating as start of cell ${foundIndex}.`);
+              break;
+          }
+          currentOffset += cellLength + DELIMITER.length;
+      }
+
+      if (foundIndex === -1) {
+          if (reportedCol === lineText.length && cellTexts.length > 0) {
+                foundIndex = cellTexts.length - 1;
+                cellStartCol = 0; 
+                for (let i = 0; i < foundIndex; i++) { cellStartCol += (cellTexts[i]?.length ?? 0) + DELIMITER.length; }
+                precedingCellsOffset = cellStartCol;
+                relativeCaretPos = cellTexts[foundIndex]?.length ?? 0; 
+                log(`${logPrefix} --> (Fallback Calc) Caret detected at END of last cell (${foundIndex}).`);
+          } else {
+            log(`${logPrefix} (Fallback Calc) FAILED to determine target cell for caret col ${reportedCol}. Allowing default handling.`);
+            return false; 
+          }
+      }
+      targetCellIndex = foundIndex;
+  }
+
+  // --- Final Validation --- 
+  if (currentLineNum < 0 || targetCellIndex < 0 || !metadataForTargetLine || targetCellIndex >= metadataForTargetLine.cols) {
+       log(`${logPrefix} FAILED final validation: Line=${currentLineNum}, Cell=${targetCellIndex}, Metadata=${!!metadataForTargetLine}. Allowing default.`);
+       if (editor) editor.ep_tables5_last_clicked = null; 
+       return false; 
+      }
+
+  log(`${logPrefix} --> Final Target: Line=${currentLineNum}, CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}`);
+  // --- End Cell/Position Determination ---
+
+  // --- Define Key Types ---
   const isTypingKey = evt.key && evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey;
   const isDeleteKey = evt.key === 'Delete' || evt.keyCode === 46;
   const isBackspaceKey = evt.key === 'Backspace' || evt.keyCode === 8;
   const isNavigationKey = [33, 34, 35, 36, 37, 38, 39, 40].includes(evt.keyCode);
   const isTabKey = evt.key === 'Tab';
-  // Add other keys to ignore explicitly if needed
-  // const isEnterKey = evt.key === 'Enter';
-
-  log(`[CaretTrace] ${funcName}: Key classification: Typing=${isTypingKey}, Backspace=${isBackspaceKey}, Delete=${isDeleteKey}, Nav=${isNavigationKey}, Tab=${isTabKey}`);
+  const isEnterKey = evt.key === 'Enter';
+  log(`${logPrefix} Key classification: Typing=${isTypingKey}, Backspace=${isBackspaceKey}, Delete=${isDeleteKey}, Nav=${isNavigationKey}, Tab=${isTabKey}, Enter=${isEnterKey}`);
 
   // --- Handle Keys --- 
 
-  // 1. Allow most navigation keys by default (except maybe Tab)
+  // 1. Allow non-Tab navigation keys immediately
   if (isNavigationKey && !isTabKey) {
-      log(`[CaretTrace] ${funcName}: Allowing navigation key: ${evt.key}`);
+      log(`${logPrefix} Allowing navigation key: ${evt.key}. Clearing click state.`);
+      if (editor) editor.ep_tables5_last_clicked = null; // Clear state on navigation
       return false;
   }
 
-  // 2. Handle Tab - Prevent default, implement navigation later
-  if (isTabKey) {
-     log(`[CaretTrace] ${funcName}: Tab key pressed in cell - Preventing default. Needs cell navigation impl.`);
+  // 2. Handle Tab - Prevent default (implement navigation later)
+  if (isTabKey) { 
+     log(`${logPrefix} Tab key pressed. Preventing default.`);
      evt.preventDefault();
+     // TODO: Implement cell navigation logic
      return true;
   }
 
-  // 3. Intercept destructive keys at boundaries
-  const currentCellTextLength = cellTexts[targetCellIndex]?.length ?? 0; // Handle potential undefined cell
-  if (isBackspaceKey && relativeCaretPos === 0 && targetCellIndex > 0) {
-      log(`[CaretTrace] ${funcName}: Intercepted Backspace at start of cell ${targetCellIndex}. Preventing default.`);
+  // 3. Handle Enter - Prevent default (usually splits the line)
+  if (isEnterKey) {
+      log(`${logPrefix} Enter key pressed. Preventing default line split.`);
       evt.preventDefault();
-      return true;
-  }
-  if (isDeleteKey && relativeCaretPos === currentCellTextLength && targetCellIndex < tableMetadata.cols - 1) {
-      log(`[CaretTrace] ${funcName}: Intercepted Delete at end of cell ${targetCellIndex}. Preventing default.`);
-      evt.preventDefault();
-      return true;
+      // Optional TODO: Implement behavior like moving to the next row/cell?
+      return true; 
   }
 
-  // 4. Handle Typing/Backspace/Delete WITHIN a cell using minimal replace range
-  const shouldModifyCellText = isTypingKey || isBackspaceKey || isDeleteKey; // Redefine based on keys we handle here
-
-  if (shouldModifyCellText && targetCellIndex >= 0) { // Ensure we have a valid target cell
-      log(`[CaretTrace] ${funcName}: HANDLED KEY (Cell Modify) - Key='${evt.key}' Type='${evt.type}' CellIndex=${targetCellIndex}`);
-
-      if (evt.type !== 'keydown') {
-          log(`[CaretTrace] ${funcName}: Ignoring non-keydown event type ('${evt.type}') for cell modification.`);
-          return false;
+  // 4. Intercept destructive keys ONLY at cell boundaries to protect delimiters
+      const currentCellTextLength = cellTexts[targetCellIndex]?.length ?? 0;
+  // Backspace at the very beginning of cell > 0
+      if (isBackspaceKey && relativeCaretPos === 0 && targetCellIndex > 0) {
+      log(`${logPrefix} Intercepted Backspace at start of cell ${targetCellIndex}. Preventing default.`);
+          evt.preventDefault();
+          return true;
+      }
+  // Delete at the very end of cell < last cell
+  if (isDeleteKey && relativeCaretPos === currentCellTextLength && targetCellIndex < metadataForTargetLine.cols - 1) {
+      log(`${logPrefix} Intercepted Delete at end of cell ${targetCellIndex}. Preventing default.`);
+          evt.preventDefault();
+          return true;
       }
 
-      evt.preventDefault();
-      log(`[CaretTrace] ${funcName}: Prevented default browser action.`);
+  // 5. Handle Typing/Backspace/Delete WITHIN a cell via manual modification
+  const isInternalBackspace = isBackspaceKey && relativeCaretPos > 0;
+  const isInternalDelete = isDeleteKey && relativeCaretPos < currentCellTextLength;
 
-      let textModified = false;
-      let newRelativeCaretPos = relativeCaretPos;
-      const currentCellText = cellTexts[targetCellIndex];
-      let newCellText = currentCellText;
+  if (isTypingKey || isInternalBackspace || isInternalDelete) {
+    // *** Use the validated currentLineNum and currentCol derived from relativeCaretPos ***
+    const currentCol = cellStartCol + relativeCaretPos;
+    log(`${logPrefix} Handling INTERNAL key='${evt.key}' Type='${evt.type}' at Line=${currentLineNum}, Col=${currentCol} (CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}).`);
 
-      log(`[CaretTrace] ${funcName}: -> Current cell text: "${currentCellText}" Relative caret: ${relativeCaretPos}`);
+    // Only process keydown events for modifications
+    if (evt.type !== 'keydown') {
+        log(`${logPrefix} Ignoring non-keydown event type ('${evt.type}') for handled key.`);
+        return false; 
+    }
 
-      // Apply modification
-      if (isTypingKey) {
-          newCellText = currentCellText.slice(0, relativeCaretPos) + evt.key + currentCellText.slice(relativeCaretPos);
-          newRelativeCaretPos++;
-          textModified = true;
-          log(`[CaretTrace] ${funcName}: -> Applied Typing: New cell text: "${newCellText}" New relative caret: ${newRelativeCaretPos}`);
-      } else if (isBackspaceKey) {
-          // We already handled the boundary case (relativeCaretPos === 0)
-          if (relativeCaretPos > 0) {
-              newCellText = currentCellText.slice(0, relativeCaretPos - 1) + currentCellText.slice(relativeCaretPos);
-              newRelativeCaretPos--;
-              textModified = true;
-              log(`[CaretTrace] ${funcName}: -> Applied Backspace: New cell text: "${newCellText}" New relative caret: ${newRelativeCaretPos}`);
-          } else {
-              log(`[CaretTrace] ${funcName}: -> Backspace at start of cell (but cell 0 or boundary handled). No change here.`);
-          }
-      } else if (isDeleteKey) {
-          // We already handled the boundary case (relativeCaretPos === currentCellTextLength)
-          if (relativeCaretPos < currentCellText.length) {
-              newCellText = currentCellText.slice(0, relativeCaretPos) + currentCellText.slice(relativeCaretPos + 1);
-              textModified = true;
-              log(`[CaretTrace] ${funcName}: -> Applied Delete: New cell text: "${newCellText}" New relative caret: ${newRelativeCaretPos}`);
-          } else {
-              log(`[CaretTrace] ${funcName}: -> Delete at end of cell (but last cell or boundary handled). No change here.`);
-          }
-      }
+    log(`${logPrefix} Preventing default browser action for keydown event.`);
+    evt.preventDefault();
 
-      // If text was potentially modified, perform minimal replace
-      if (textModified) {
-          log(`[CaretTrace] ${funcName}: Text modified. Updating document via MINIMAL range replace...`);
+    let newAbsoluteCaretCol = -1;
+    let repBeforeEdit = null; // Store rep before edits for attribute helper
 
-          const cellAbsStart = precedingCellsOffset;
-          const cellAbsEnd = precedingCellsOffset + currentCellText.length;
-          const replaceRangeStart = [currentLineNum, cellAbsStart];
-          const replaceRangeEnd = [currentLineNum, cellAbsEnd];
+    try {
+        repBeforeEdit = editorInfo.ace_getRep(); // Get rep *before* making changes
 
-          log(`[CaretTrace] ${funcName}: -> Replacing range [${replaceRangeStart}]-[${replaceRangeEnd}] with new cell text: "${newCellText}"`);
+    if (isTypingKey) {
+            const insertPos = [currentLineNum, currentCol];
+            log(`${logPrefix} -> Inserting text '${evt.key}' at [${insertPos}]`);
+            editorInfo.ace_performDocumentReplaceRange(insertPos, insertPos, evt.key);
+            newAbsoluteCaretCol = currentCol + 1;
 
-          try {
-              // Perform the minimal replacement
-              editorInfo.ace_performDocumentReplaceRange(replaceRangeStart, replaceRangeEnd, newCellText);
-              log(`[CaretTrace] ${funcName}: -> ace_performDocumentReplaceRange (minimal) called.`);
+        } else if (isInternalBackspace) {
+            const delRangeStart = [currentLineNum, currentCol - 1];
+            const delRangeEnd = [currentLineNum, currentCol];
+            log(`${logPrefix} -> Deleting (Backspace) range [${delRangeStart}]-[${delRangeEnd}]`);
+            editorInfo.ace_performDocumentReplaceRange(delRangeStart, delRangeEnd, '');
+            newAbsoluteCaretCol = currentCol - 1;
 
-              // <<< RE-ADD ATTRIBUTE RE-APPLICATION >>>
-              log(`[CaretTrace] ${funcName}: -> Attempting to re-apply metadata attribute via editorInfo context...`);
-              const applyHelper = editorInfo.ep_tables5_applyMeta; // Retrieve helper attached in aceInitialized
-              if (applyHelper && typeof applyHelper === 'function') {
-                  // Get the UPDATED representation after text change
-                  const updatedRep = editorInfo.ace_getRep();
-                  if (!updatedRep) {
-                      console.error(`[ep_tables5] ${funcName}: Failed to get updated rep after text replace. Cannot re-apply attribute reliably.`);
-                  } else {
-                       log(`[CaretTrace] ${funcName}: -> Got updated rep. Calling helper via editorInfo.`);
-                       // Call the retrieved helper, passing the necessary context (updatedRep, editorInfo)
-                       applyHelper(currentLineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, updatedRep, editorInfo);
-                       log(`[CaretTrace] ${funcName}: -> Metadata attribute re-applied via helper.`);
-                  }
-              } else {
-                   console.error(`[ep_tables5] ${funcName}: Could not find applyTableLineMetadataAttribute helper on editorInfo.ep_tables5_applyMeta.`);
-                   log(`[CaretTrace] ${funcName}: -> FAILED to re-apply metadata attribute.`);
-              }
-              // <<< END ATTRIBUTE RE-APPLICATION >>>
+        } else if (isInternalDelete) {
+            const delRangeStart = [currentLineNum, currentCol];
+            const delRangeEnd = [currentLineNum, currentCol + 1];
+            log(`${logPrefix} -> Deleting (Delete) range [${delRangeStart}]-[${delRangeEnd}]`);
+            editorInfo.ace_performDocumentReplaceRange(delRangeStart, delRangeEnd, '');
+            newAbsoluteCaretCol = currentCol; // Caret stays at the same column for delete
+        }
 
-              // Calculate and set the new caret position immediately
-              const newAbsoluteCaretCol = precedingCellsOffset + newRelativeCaretPos;
-              const newCaretPos = [currentLineNum, newAbsoluteCaretCol];
-              log(`[CaretTrace] ${funcName}: -> Calculated new absolute caret: Col=${newAbsoluteCaretCol}`);
-              try {
-                  log(`[CaretTrace] ${funcName}: -> Setting selection immediately to:`, newCaretPos);
-                  editorInfo.ace_performSelectionChange(newCaretPos, newCaretPos, false);
-                  log(`[CaretTrace] ${funcName}: -> Selection set successfully.`);
+        // *** CRITICAL: Re-apply the line attribute after ANY modification ***
+        log(`${logPrefix} -> Re-applying tbljson line attribute...`);
+        const applyHelper = editorInfo.ep_tables5_applyMeta; 
+        if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) { 
+             // Pass the original lineAttrString if available AND if it belongs to the currentLineNum
+             const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
+             applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply);
+             log(`${logPrefix} -> tbljson line attribute re-applied (using rep before edit).`);
+                } else {
+             console.error(`${logPrefix} -> FAILED to re-apply tbljson attribute (helper or repBeforeEdit missing).`);
+             const currentRepFallback = editorInfo.ace_getRep();
+             if (applyHelper && typeof applyHelper === 'function' && currentRepFallback) {
+                 log(`${logPrefix} -> Retrying attribute application with current rep...`);
+                 applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null); // Cannot guarantee old attr string is valid here
+                 log(`${logPrefix} -> tbljson line attribute re-applied (using current rep fallback).`);
+            } else {
+                  console.error(`${logPrefix} -> FAILED to re-apply tbljson attribute even with fallback rep.`);
+             }
+        }
+        
+        // Set caret position immediately
+        if (newAbsoluteCaretCol >= 0) {
+             const newCaretPos = [currentLineNum, newAbsoluteCaretCol]; // Use the trusted currentLineNum
+             log(`${logPrefix} -> Setting selection immediately to:`, newCaretPos);
+             try {
+                editorInfo.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+                log(`${logPrefix} -> Selection set immediately.`);
 
-                  // <<< ADDED: Verify attribute presence immediately after setting >>>
-                  try {
-                     const verifyAttr = docManager.getAttributeOnLine(currentLineNum, ATTR_TABLE_JSON);
-                     log(`[CaretTrace] ${funcName}: -> VERIFY attribute on line ${currentLineNum} immediately after setting: ${verifyAttr ? 'FOUND' : 'NOT FOUND'}`, verifyAttr || '(null)');
-                  } catch (verifyError) {
-                     log(`[CaretTrace] ${funcName}: -> ERROR verifying attribute immediately after setting:`, verifyError);
-                  }
-                  // <<< END VERIFY >>>
+                // Add sync hint AFTER setting selection
+                editorInfo.ace_fastIncorp(5); 
+                log(`${logPrefix} -> Requested sync hint (fastIncorp 5).`);
 
-              } catch (selError) {
-                   console.error(`[CaretTrace] ${funcName}: ERROR during immediate selection setting:`, selError);
-                   log(`[CaretTrace] ${funcName}: Error details:`, { message: selError.message, stack: selError.stack });
-              }
+                // Store the updated caret info for the next event
+                const newRelativePos = newAbsoluteCaretCol - cellStartCol;
+                editor.ep_tables5_last_clicked = {
+                    lineNum: currentLineNum, 
+                    tblId: metadataForTargetLine.tblId,
+                    cellIndex: targetCellIndex,
+                    relativePos: newRelativePos
+                };
+                log(`${logPrefix} -> Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
 
-          } catch (replaceError) {
-              log(`[CaretTrace] ${funcName}: ERROR during minimal ace_performDocumentReplaceRange:`, replaceError);
-              console.error('[ep_tables5] Error replacing cell text range:', replaceError);
-              // Might need to return false here to allow default handling as fallback?
-          }
-      } else {
-          log(`[CaretTrace] ${funcName}: No text modification needed for this key.`);
-      }
+            } catch (selError) {
+                 console.error(`${logPrefix} -> ERROR setting selection immediately:`, selError);
+             }
+        } else {
+            log(`${logPrefix} -> Warning: newAbsoluteCaretCol not set, skipping selection update.`);
+            }
 
-      const endLogTime = Date.now();
-      log(`[CaretTrace] ${funcName}: END (Handled Key) -> Returned true. Duration: ${endLogTime - startLogTime}ms`);
-      return true; // Indicate we handled the key event
-  }
+        } catch (error) {
+        log(`${logPrefix} ERROR during manual key handling:`, error);
+            console.error('[ep_tables5] Error processing key event update:', error);
+        // Maybe return false to allow default as a fallback on error?
+        // For now, return true as we prevented default.
+        return true;
+    }
+       
+    const endLogTime = Date.now();
+    log(`${logPrefix} END (Handled Internal Edit Manually) Key='${evt.key}' Type='${evt.type}' -> Returned true. Duration: ${endLogTime - startLogTime}ms`);
+    return true; // We handled the key event
 
-  // --- Fallback for unhandled keys --- 
-  const endLogTimeUnhandled = Date.now();
-  log(`[CaretTrace] ${funcName}: Key not explicitly handled (or not a modification key in a valid cell). Allowing default. END (Default Allowed). Duration: ${endLogTimeUnhandled - startLogTime}ms`);
-  return false;
+  } // End if(isTypingKey || isInternalBackspace || isInternalDelete)
+
+
+  // Fallback for any other keys or edge cases not handled above
+  const endLogTimeFinal = Date.now();
+  log(`${logPrefix} END (Fell Through / Unhandled Case) Key='${evt.key}' Type='${evt.type}'. Allowing default. Duration: ${endLogTimeFinal - startLogTime}ms`);
+  // Clear click state if it wasn't handled?
+  // if (editor?.ep_tables5_last_clicked) editor.ep_tables5_last_clicked = null;
+  return false; // Allow default browser/ACE handling
 };
 
 // ───────────────────── ace init + public helpers ─────────────────────
 exports.aceInitialized = (h, ctx) => {
-  log('aceInitialized: START', { h, ctx });
+  const logPrefix = '[ep_tables5:aceInitialized]';
+  log(`${logPrefix} START`, { h, ctx });
   const ed  = ctx.editorInfo;
   const docManager = ctx.documentAttributeManager;
 
   // Attach the helper function to editorInfo for later retrieval in aceKeyEvent
   ed.ep_tables5_applyMeta = applyTableLineMetadataAttribute;
-  log('aceInitialized: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta');
+  log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta`);
+
+  // *** REMOVED: Setup mousedown listener via callWithAce (Moved to postAceInit) ***
 
   // Helper function to apply the metadata attribute to a line
   // Moved to module scope to be accessible by aceKeyEvent
-  function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo) {
+  function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null) {
     const funcName = 'applyTableLineMetadataAttribute';
-    log(`${funcName}: Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
-    const metadata = {
-        tblId: tblId,
-        row: rowIndex,
-        cols: numCols // Store column count in metadata
-    };
-    const attributeString = JSON.stringify(metadata);
-    log(`${funcName}: Metadata Attribute String: ${attributeString}`);
+    // Use same log prefix for consistency
+    // const logPrefix = '[ep_tables5:aceInitialized]'; // Already defined in outer scope
+    log(`${logPrefix}:${funcName}: Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
+
+    // If attributeString is not provided, construct it. Otherwise, use the provided one.
+    if (!attributeString) {
+        log(`${logPrefix}:${funcName}: Constructing attribute string as none was provided.`);
+        const metadata = {
+            tblId: tblId,
+            row: rowIndex,
+            cols: numCols // Store column count in metadata
+        };
+        attributeString = JSON.stringify(metadata);
+    } else {
+         log(`${logPrefix}:${funcName}: Using pre-provided attribute string: ${attributeString}`); // Log the provided string
+    }
+
+    log(`${logPrefix}:${funcName}: Metadata Attribute String to apply: ${attributeString}`);
     try {
-       // Get the current text length of the line
+       // Get the current text length of the line *from the provided rep*
        const lineEntry = rep.lines.atIndex(lineNum);
        if (!lineEntry) {
+           // Add specific log for missing line entry
+           log(`${logPrefix}:${funcName}: ERROR - Could not find line entry in provided rep for line number ${lineNum}. Rep lines:`, rep.lines);
            throw new Error(`Could not find line entry for line number ${lineNum}`);
        }
        const lineLength = lineEntry.text.length;
-       log(`${funcName}: Line ${lineNum} current text length: ${lineLength}. Line text: "${lineEntry.text}"`);
+       // Ensure length is at least 1 if line is technically empty but exists
+       const effectiveLineLength = Math.max(1, lineLength);
+       log(`${logPrefix}:${funcName}: Line ${lineNum} current text length (from rep): ${lineLength}. Effective length for attribute: ${effectiveLineLength}. Line text: "${lineEntry.text}"`);
 
-       // Use ace_performDocumentApplyAttributesToRange for potentially better hook triggering
-       // Apply attribute to the ENTIRE line text range
+       // Use ace_performDocumentApplyAttributesToRange
+       // *** Apply attribute to the FULL line range ***
        const start = [lineNum, 0];
-       const end = [lineNum, Math.max(1, lineLength)]; // Ensure range is at least 1 char wide
-       log(`${funcName}: Applying attribute via ace_performDocumentApplyAttributesToRange to FULL range [${start}]-[${end}]`);
+       const end = [lineNum, effectiveLineLength]; // Apply across the entire line text
+       log(`${logPrefix}:${funcName}: Applying attribute via ace_performDocumentApplyAttributesToRange to FULL range [${start}]-[${end}]`);
        editorInfo.ace_performDocumentApplyAttributesToRange(start, end, [[ATTR_TABLE_JSON, attributeString]]);
-       log(`${funcName}: Applied METADATA attribute to line ${lineNum} over full range.`);
+       log(`${logPrefix}:${funcName}: Applied METADATA attribute to line ${lineNum} over full range.`);
     } catch(e) {
-        console.error(`[ep_tables5] ${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
-        log(`[ep_tables5] ${funcName}: Error details:`, { message: e.message, stack: e.stack });
+        console.error(`[ep_tables5] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
+        log(`[ep_tables5] ${logPrefix}:${funcName}: Error details:`, { message: e.message, stack: e.stack });
     }
   }
 
@@ -718,10 +845,10 @@ exports.aceInitialized = (h, ctx) => {
     // --- Phase 1: Prepare Data --- 
     const tblId   = rand();
     log(`${funcName}: Generated table ID: ${tblId}`);
-    const initialCellContent = ' '; // Start with a single space per cell
+    const initialCellContent = ''; // Start with an empty cell
     const lineTxt = Array.from({ length: cols }).fill(initialCellContent).join(DELIMITER);
     log(`${funcName}: Constructed initial line text for ${cols} cols: "${lineTxt}"`);
-    const block = Array.from({ length: rows }).fill(lineTxt).join('\n') + '\n'; 
+    const block = Array.from({ length: rows }).fill(lineTxt).join('\n') + '\n';
     log(`${funcName}: Constructed block for ${rows} rows:\n${block}`);
 
     // Get current selection BEFORE making changes using ace_getRep()
@@ -806,5 +933,100 @@ exports.aceEditorCSS                = () => {
 
 // Register TABLE as a block element, hoping it influences rendering behavior
 exports.aceRegisterBlockElements = () => ['table'];
+
+// *** ADDED: postAceInit hook for attaching listeners ***
+exports.postAceInit = (hookName, ctx) => {
+  const func = '[ep_tables5:postAceInit]';
+  log(`${func} START`);
+  const editorInfo = ctx.ace; // Get editorInfo from context
+
+  if (!editorInfo) {
+    console.error(`${func} ERROR: editorInfo (ctx.ace) is not available.`);
+    return;
+  }
+
+  // Setup mousedown listener via callWithAce
+  editorInfo.ace_callWithAce((ace) => {
+      const editor = ace.editor;
+      const inner = ace.editor.container; // Use the main container
+
+      if (!editor || !inner) {
+          console.error(`${func} ERROR: ace.editor or ace.editor.container not found within ace_callWithAce.`);
+          return;
+      }
+
+      log(`${func} Inside callWithAce for attaching mousedown listeners.`);
+
+      // Initialize shared state on the editor object
+      if (!editor.ep_tables5_last_clicked) {
+          editor.ep_tables5_last_clicked = null;
+          log(`${func} Initialized ace.editor.ep_tables5_last_clicked`);
+      }
+
+      log(`${func} Attempting to attach mousedown listener to editor container for cell selection...`);
+
+      inner.addEventListener('mousedown', (evt) => {
+          const target = evt.target;
+          const mousedownFuncName = '[ep_tables5 mousedown]';
+          log(`${mousedownFuncName} RAW MOUSE DOWN detected. Target:`, target);
+
+          // Check if the click is inside a TD of our table
+          const clickedTD = target.closest('td');
+          const clickedTR = target.closest('tr');
+          const clickedTable = target.closest('table.dataTable');
+
+          // Clear previous selection state regardless of where click happened
+          if (editor.ep_tables5_last_clicked) {
+              log(`${mousedownFuncName} Clearing previous selection info.`);
+              // TODO: Add visual class removal if needed
+          }
+          editor.ep_tables5_last_clicked = null; // Clear state first
+
+          if (clickedTD && clickedTR && clickedTable) {
+              log(`${mousedownFuncName} Click detected inside table.dataTable td.`);
+              try {
+                  const cellIndex = Array.from(clickedTR.children).indexOf(clickedTD);
+                  const lineNode = clickedTable.closest('div.ace-line');
+                  const tblId = clickedTable.getAttribute('data-tblId');
+
+                  // Ensure ace.rep and ace.rep.lines are available
+                  if (!ace.rep || !ace.rep.lines) {
+                      console.error(`${mousedownFuncName} ERROR: ace.rep or ace.rep.lines not available inside mousedown listener.`);
+                      return;
+                  }
+
+                  if (lineNode && lineNode.id && tblId !== null && cellIndex !== -1) {
+                      const lineNum = ace.rep.lines.indexOfKey(lineNode.id);
+                      if (lineNum !== -1) {
+                           // Store the accurately determined cell info
+                           // Initialize relative position - might be refined later if needed
+                           const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
+                           editor.ep_tables5_last_clicked = clickInfo;
+                           log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
+
+                           // TODO: Add visual class for selection if desired
+                           log(`${mousedownFuncName} TEST: Skipped adding/removing selected-table-cell class`);
+
+                      } else {
+                          log(`${mousedownFuncName} Clicked cell (ERROR): Could not find line number for node ID: ${lineNode.id}`);
+                      }
+                  } else {
+                       log(`${mousedownFuncName} Clicked cell (ERROR): Missing required info (lineNode, lineNode.id, tblId, or valid cellIndex).`, { lineNode, tblId, cellIndex });
+                  }
+              } catch (e) {
+                  console.error(`${mousedownFuncName} Error processing table cell click:`, e);
+                  log(`${mousedownFuncName} Error details:`, { message: e.message, stack: e.stack });
+                  editor.ep_tables5_last_clicked = null; // Ensure state is clear on error
+              }
+          } else {
+               log(`${mousedownFuncName} Click was outside a table.dataTable td.`);
+          }
+      });
+      log(`${func} Mousedown listeners for cell selection attached successfully (inside callWithAce).`);
+
+  }, 'tableCellSelectionPostAce', true); // Unique name for callstack
+
+  log(`${func} END`);
+};
 
 // END OF FILE
