@@ -791,8 +791,6 @@ exports.aceInitialized = (h, ctx) => {
   // Moved to module scope to be accessible by aceKeyEvent
   function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null) {
     const funcName = 'applyTableLineMetadataAttribute';
-    // Use same log prefix for consistency
-    // const logPrefix = '[ep_tables5:aceInitialized]'; // Already defined in outer scope
     log(`${logPrefix}:${funcName}: Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
 
     // If attributeString is not provided, construct it. Otherwise, use the provided one.
@@ -810,25 +808,25 @@ exports.aceInitialized = (h, ctx) => {
 
     log(`${logPrefix}:${funcName}: Metadata Attribute String to apply: ${attributeString}`);
     try {
-       // Get the current text length of the line *from the provided rep*
-       const lineEntry = rep.lines.atIndex(lineNum);
+       // Get a FRESH rep to ensure line length is current after edits
+       const liveRep   = editorInfo.ace_getRep();
+       const lineEntry = liveRep.lines.atIndex(lineNum);
        if (!lineEntry) {
-           // Add specific log for missing line entry
            log(`${logPrefix}:${funcName}: ERROR - Could not find line entry in provided rep for line number ${lineNum}. Rep lines:`, rep.lines);
            throw new Error(`Could not find line entry for line number ${lineNum}`);
        }
        const lineLength = lineEntry.text.length;
        // Ensure length is at least 1 if line is technically empty but exists
-       const effectiveLineLength = Math.max(1, lineLength);
-       log(`${logPrefix}:${funcName}: Line ${lineNum} current text length (from rep): ${lineLength}. Effective length for attribute: ${effectiveLineLength}. Line text: "${lineEntry.text}"`);
+       const effectiveLineLength = Math.max(1, lineLength); 
+       log(`${logPrefix}:${funcName}: Line ${lineNum} current text length (from live rep): ${lineLength}. Effective length for attribute: ${effectiveLineLength}. Line text: "${lineEntry.text}"`);
 
        // Use ace_performDocumentApplyAttributesToRange
        // *** Apply attribute to the FULL line range ***
        const start = [lineNum, 0];
-       const end = [lineNum, effectiveLineLength]; // Apply across the entire line text
-       log(`${logPrefix}:${funcName}: Applying attribute via ace_performDocumentApplyAttributesToRange to FULL range [${start}]-[${end}]`);
+       const end = [lineNum, effectiveLineLength]; // Use potentially corrected length
+       log(`${logPrefix}:${funcName}: Applying attribute via ace_performDocumentApplyAttributesToRange to range [${start}]-[${end}]`);
        editorInfo.ace_performDocumentApplyAttributesToRange(start, end, [[ATTR_TABLE_JSON, attributeString]]);
-       log(`${logPrefix}:${funcName}: Applied METADATA attribute to line ${lineNum} over full range.`);
+       log(`${logPrefix}:${funcName}: Applied METADATA attribute to line ${lineNum} over range [${start}]-[${end}].`);
     } catch(e) {
         console.error(`[ep_tables5] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
         log(`[ep_tables5] ${logPrefix}:${funcName}: Error details:`, { message: e.message, stack: e.stack });
@@ -845,7 +843,7 @@ exports.aceInitialized = (h, ctx) => {
     // --- Phase 1: Prepare Data --- 
     const tblId   = rand();
     log(`${funcName}: Generated table ID: ${tblId}`);
-    const initialCellContent = ''; // Start with an empty cell
+    const initialCellContent = ' '; // Start with a single space per cell
     const lineTxt = Array.from({ length: cols }).fill(initialCellContent).join(DELIMITER);
     log(`${funcName}: Constructed initial line text for ${cols} cols: "${lineTxt}"`);
     const block = Array.from({ length: rows }).fill(lineTxt).join('\n') + '\n';
