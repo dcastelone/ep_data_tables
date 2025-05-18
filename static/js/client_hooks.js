@@ -777,18 +777,249 @@ exports.aceKeyEvent = (h, ctx) => {
 // ───────────────────── ace init + public helpers ─────────────────────
 exports.aceInitialized = (h, ctx) => {
   const logPrefix = '[ep_tables5:aceInitialized]';
-  log(`${logPrefix} START`, { h, ctx });
-  const ed  = ctx.editorInfo;
+  log(`${logPrefix} START`, { hook_name: h, context: ctx });
+  const ed = ctx.editorInfo;
   const docManager = ctx.documentAttributeManager;
 
-  // Attach the helper function to editorInfo for later retrieval in aceKeyEvent
+  log(`${logPrefix} Attaching ep_tables5_applyMeta helper to editorInfo.`);
   ed.ep_tables5_applyMeta = applyTableLineMetadataAttribute;
-  log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta`);
+  log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta successfully.`);
 
-  // *** REMOVED: Setup mousedown listener via callWithAce (Moved to postAceInit) ***
+  // *** ADDED: Paste event listener ***
+  log(`${logPrefix} Preparing to attach paste listener via ace_callWithAce.`);
+  ed.ace_callWithAce((ace) => {
+    const callWithAceLogPrefix = '[ep_tables5:aceInitialized:callWithAceForPaste]';
+    log(`${callWithAceLogPrefix} Entered ace_callWithAce callback for paste listener.`);
+
+    if (!ace || !ace.editor) {
+      console.error(`${callWithAceLogPrefix} ERROR: ace or ace.editor is not available. Cannot attach paste listener.`);
+      log(`${callWithAceLogPrefix} Aborting paste listener attachment due to missing ace.editor.`);
+      return;
+    }
+    const editor = ace.editor;
+    log(`${callWithAceLogPrefix} ace.editor obtained successfully.`);
+
+    // Attempt to find the inner iframe body, similar to ep_image_insert
+    let $inner;
+    try {
+      log(`${callWithAceLogPrefix} Attempting to find inner iframe body for paste listener attachment.`);
+      const $iframeOuter = $('iframe[name="ace_outer"]');
+      if ($iframeOuter.length === 0) {
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find outer iframe (ace_outer).`);
+        log(`${callWithAceLogPrefix} Failed to find ace_outer.`);
+        return;
+      }
+      log(`${callWithAceLogPrefix} Found ace_outer:`, $iframeOuter);
+
+      const $iframeInner = $iframeOuter.contents().find('iframe[name="ace_inner"]');
+      if ($iframeInner.length === 0) {
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find inner iframe (ace_inner).`);
+        log(`${callWithAceLogPrefix} Failed to find ace_inner within ace_outer.`);
+        return;
+      }
+      log(`${callWithAceLogPrefix} Found ace_inner:`, $iframeInner);
+
+      const innerDocBody = $iframeInner.contents().find('body');
+      if (innerDocBody.length === 0) {
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find body element in inner iframe.`);
+        log(`${callWithAceLogPrefix} Failed to find body in ace_inner.`);
+        return;
+      }
+      $inner = $(innerDocBody[0]); // Ensure it's a jQuery object of the body itself
+      log(`${callWithAceLogPrefix} Successfully found inner iframe body:`, $inner);
+    } catch (e) {
+      console.error(`${callWithAceLogPrefix} ERROR: Exception while trying to find inner iframe body:`, e);
+      log(`${callWithAceLogPrefix} Exception details:`, { message: e.message, stack: e.stack });
+      return;
+    }
+
+    if (!$inner || $inner.length === 0) {
+      console.error(`${callWithAceLogPrefix} ERROR: $inner is not valid after attempting to find iframe body. Cannot attach paste listener.`);
+      log(`${callWithAceLogPrefix} $inner is invalid. Aborting.`);
+      return;
+    }
+
+    log(`${callWithAceLogPrefix} Attaching paste event listener to $inner (inner iframe body).`);
+    $inner.on('paste', (evt) => {
+      const pasteLogPrefix = '[ep_tables5:pasteHandler]';
+      log(`${pasteLogPrefix} PASTE EVENT TRIGGERED. Event object:`, evt);
+
+      log(`${pasteLogPrefix} Getting current editor representation (rep).`);
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) {
+        log(`${pasteLogPrefix} WARNING: Could not get representation or selection. Allowing default paste.`);
+        console.warn(`${pasteLogPrefix} Could not get rep or selStart.`);
+        return; // Allow default
+      }
+      log(`${pasteLogPrefix} Rep obtained. selStart:`, rep.selStart, `selEnd:`, rep.selEnd);
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+      log(`${pasteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
+
+      log(`${pasteLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      if (!lineAttrString) {
+        log(`${pasteLogPrefix} Line ${lineNum} is NOT a table line (no '${ATTR_TABLE_JSON}' attribute found). Allowing default paste.`);
+        return; // Not a table line
+      }
+      log(`${pasteLogPrefix} Line ${lineNum} IS a table line. Attribute string: "${lineAttrString}".`);
+
+      let tableMetadata;
+      try {
+        log(`${pasteLogPrefix} Parsing table metadata from attribute string.`);
+        tableMetadata = JSON.parse(lineAttrString);
+        log(`${pasteLogPrefix} Parsed table metadata:`, tableMetadata);
+        if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+          log(`${pasteLogPrefix} WARNING: Invalid or incomplete table metadata on line ${lineNum}. Allowing default paste. Metadata:`, tableMetadata);
+          console.warn(`${pasteLogPrefix} Invalid table metadata for line ${lineNum}.`);
+          return; // Allow default
+        }
+        log(`${pasteLogPrefix} Table metadata validated successfully: tblId=${tableMetadata.tblId}, row=${tableMetadata.row}, cols=${tableMetadata.cols}.`);
+      } catch (e) {
+        console.error(`${pasteLogPrefix} ERROR parsing table metadata for line ${lineNum}:`, e);
+        log(`${pasteLogPrefix} Metadata parse error. Allowing default paste. Error details:`, { message: e.message, stack: e.stack });
+        return; // Allow default
+      }
+
+      log(`${pasteLogPrefix} Accessing clipboard data.`);
+      const clipboardData = evt.originalEvent.clipboardData || window.clipboardData;
+      if (!clipboardData) {
+        log(`${pasteLogPrefix} WARNING: No clipboard data found. Allowing default paste.`);
+        return; // Allow default
+      }
+      log(`${pasteLogPrefix} Clipboard data object obtained:`, clipboardData);
+
+      log(`${pasteLogPrefix} Getting 'text/plain' from clipboard.`);
+      const pastedTextRaw = clipboardData.getData('text/plain');
+      log(`${pasteLogPrefix} Pasted text raw: "${pastedTextRaw}" (Type: ${typeof pastedTextRaw})`);
+
+      // Scrub newlines
+      const pastedText = pastedTextRaw.replace(/(\r\n|\n|\r)/gm, " "); // Replace newlines with a single space
+      log(`${pasteLogPrefix} Pasted text after scrubbing newlines: "${pastedText}"`);
+
+      if (typeof pastedText !== 'string' || pastedText.trim().length === 0) { // Also check if trimmed text is empty
+        log(`${pasteLogPrefix} No plain text in clipboard or text is empty (after trimming). Allowing default paste.`);
+        const types = clipboardData.types;
+        log(`${pasteLogPrefix} Clipboard types available:`, types);
+        if (types && types.includes('text/html')) {
+            log(`${pasteLogPrefix} Clipboard also contains HTML:`, clipboardData.getData('text/html'));
+        }
+        return; // Allow default if no plain text
+      }
+      log(`${pasteLogPrefix} Plain text obtained from clipboard: "${pastedText}". Length: ${pastedText.length}.`);
+
+      log(`${pasteLogPrefix} INTERCEPTING paste of plain text into table line ${lineNum}. PREVENTING DEFAULT browser action.`);
+      evt.preventDefault();
+
+      try {
+        log(`${pasteLogPrefix} Preparing to perform paste operations via ed.ace_callWithAce.`);
+        ed.ace_callWithAce((aceInstance) => {
+            const callAceLogPrefix = `${pasteLogPrefix}[ace_callWithAceOps]`;
+            log(`${callAceLogPrefix} Entered ace_callWithAce for paste operations. selStart:`, selStart, `selEnd:`, selEnd);
+
+            log(`${callAceLogPrefix} Original line text from initial rep: "${rep.lines.atIndex(lineNum).text}". SelStartCol: ${selStart[1]}, SelEndCol: ${selEnd[1]}.`);
+            
+            log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to insert text: "${pastedText}".`);
+            aceInstance.ace_performDocumentReplaceRange(selStart, selEnd, pastedText);
+            log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
+
+            log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
+            const repAfterReplace = aceInstance.ace_getRep();
+            log(`${callAceLogPrefix} Fetched rep after replace for applyMeta. Line ${lineNum} text now: "${repAfterReplace.lines.atIndex(lineNum).text}"`);
+            
+            ed.ep_tables5_applyMeta(
+              lineNum,
+              tableMetadata.tblId,
+              tableMetadata.row,
+              tableMetadata.cols,
+              repAfterReplace,
+              ed, // editorInfo (ctx.editorInfo)
+              null
+            );
+            log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+
+            const newCaretCol = selStart[1] + pastedText.length;
+            const newCaretPos = [lineNum, newCaretCol];
+            log(`${callAceLogPrefix} New calculated caret position: [${newCaretPos}]. Setting selection.`);
+            aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+            log(`${callAceLogPrefix} Selection change successful.`);
+            
+            log(`${callAceLogPrefix} Requesting fastIncorp(10) for sync.`);
+            aceInstance.ace_fastIncorp(10);
+            log(`${callAceLogPrefix} fastIncorp requested.`);
+
+            log(`${callAceLogPrefix} Attempting to update stored click/caret info (editor.ep_tables5_last_clicked).`);
+            const updatedLineText = aceInstance.ace_getRep().lines.atIndex(lineNum).text;
+            const cells = updatedLineText.split(DELIMITER);
+            let currentOffset = 0;
+            let targetCellIndex = -1;
+            let cellStartCol = 0;
+            log(`${callAceLogPrefix} Recalculating targetCellIndex. Updated line text for split: "${updatedLineText}". Cells found: ${cells.length}`);
+
+            for (let i = 0; i < cells.length; i++) {
+                const cellText = cells[i];
+                const cellLength = cellText.length;
+                const cellEndColThisIteration = currentOffset + cellLength;
+                log(`${callAceLogPrefix} Checking cell ${i}: "${cellText}" (len ${cellLength}). Range: [${currentOffset} - ${cellEndColThisIteration}]. Caret: ${newCaretCol}`);
+                
+                if (newCaretCol >= currentOffset && newCaretCol <= cellEndColThisIteration) {
+                    targetCellIndex = i;
+                    cellStartCol = currentOffset;
+                    log(`${callAceLogPrefix} Caret IN cell ${i}. cellStartCol=${cellStartCol}. Breaking loop.`);
+                    break;
+                }
+                if (i < cells.length - 1) {
+                    const delimiterStartCol = cellEndColThisIteration;
+                    const delimiterEndCol = delimiterStartCol + DELIMITER.length;
+                    if (newCaretCol > delimiterStartCol && newCaretCol <= delimiterEndCol) {
+                        targetCellIndex = i + 1;
+                        cellStartCol = delimiterEndCol;
+                        log(`${callAceLogPrefix} Caret ON DELIMITER after cell ${i}. Moving to cell ${targetCellIndex}. cellStartCol=${cellStartCol}. Breaking loop.`);
+                        break;
+                    }
+                }
+                currentOffset += cellLength + DELIMITER.length;
+            }
+            if (targetCellIndex === -1 && newCaretCol === updatedLineText.length && cells.length > 0) {
+                targetCellIndex = cells.length - 1;
+                cellStartCol = updatedLineText.length - cells[targetCellIndex].length;
+                 log(`${callAceLogPrefix} Caret at END of line after last cell. Target cell ${targetCellIndex}. cellStartCol=${cellStartCol}.`);
+            }
+            if (targetCellIndex === -1 && cells.length > 0) {
+                targetCellIndex = 0;
+                cellStartCol = 0;
+                log(`${callAceLogPrefix} WARNING: Could not determine target cell for caret ${newCaretCol}. Defaulting to cell 0.`);
+            }
+
+            if (editor && editor.ep_tables5_last_clicked && editor.ep_tables5_last_clicked.tblId === tableMetadata.tblId) {
+               const newRelativePos = newCaretCol - cellStartCol;
+               editor.ep_tables5_last_clicked = {
+                  lineNum: lineNum,
+                  tblId: tableMetadata.tblId,
+                  cellIndex: targetCellIndex,
+                  relativePos: newRelativePos < 0 ? 0 : newRelativePos,
+               };
+               log(`${callAceLogPrefix} Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
+            } else {
+                log(`${callAceLogPrefix} Did not update ep_tables5_last_clicked. Conditions not met: editor exists?=${!!editor}, last_clicked exists?=${!!editor?.ep_tables5_last_clicked}, tblId matches?=${editor?.ep_tables5_last_clicked?.tblId === tableMetadata.tblId}`);
+            }
+            log(`${callAceLogPrefix} Paste operations within ace_callWithAce completed successfully.`);
+        }, 'tablePasteTextOperations', true); // Unique name for this task
+        log(`${pasteLogPrefix} ed.ace_callWithAce for paste operations was called.`);
+
+      } catch (error) {
+        console.error(`${pasteLogPrefix} CRITICAL ERROR during paste handling operation (outside ace_callWithAce or if it threw synchronously):`, error);
+        log(`${pasteLogPrefix} Error details:`, { message: error.message, stack: error.stack });
+        log(`${pasteLogPrefix} Paste handling FAILED. END OF HANDLER.`);
+      }
+    });
+    log(`${callWithAceLogPrefix} Paste event listener attached.`);
+  }, 'tables5_paste_listener', true);
+  log(`${logPrefix} ace_callWithAce for paste listener setup completed.`);
+  // *** END ADDED: Paste event listener ***
 
   // Helper function to apply the metadata attribute to a line
-  // Moved to module scope to be accessible by aceKeyEvent
   function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null) {
     const funcName = 'applyTableLineMetadataAttribute';
     log(`${logPrefix}:${funcName}: Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
