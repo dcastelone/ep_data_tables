@@ -608,6 +608,140 @@ exports.aceKeyEvent = (h, ctx) => {
   log(`${logPrefix} --> Final Target: Line=${currentLineNum}, CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}`);
   // --- End Cell/Position Determination ---
 
+  // --- START NEW: Handle Highlight Deletion/Replacement ---
+  const selStartActual = rep.selStart;
+  const selEndActual = rep.selEnd;
+  const hasSelection = selStartActual[0] !== selEndActual[0] || selStartActual[1] !== selEndActual[1];
+
+  if (hasSelection) {
+    log(`${logPrefix} [selection] Active selection detected. Start:[${selStartActual[0]},${selStartActual[1]}], End:[${selEndActual[0]},${selEndActual[1]}]`);
+    log(`${logPrefix} [caretTrace] [selection] Initial rep.selStart: Line=${rep.selStart[0]}, Col=${rep.selStart[1]}`);
+
+    if (selStartActual[0] !== currentLineNum || selEndActual[0] !== currentLineNum) {
+      log(`${logPrefix} [selection] Selection spans multiple lines (${selStartActual[0]}-${selEndActual[0]}) or is not on the current focused table line (${currentLineNum}). Preventing default action.`);
+      evt.preventDefault();
+      return true; 
+    }
+
+    const selectionStartColInLine = selStartActual[1];
+    const selectionEndColInLine = selEndActual[1];
+
+    const currentCellFullText = cellTexts[targetCellIndex] || '';
+    // cellStartCol is already defined and calculated based on trustedLastClick or fallback
+    const cellContentStartColInLine = cellStartCol;
+    const cellContentEndColInLine = cellStartCol + currentCellFullText.length;
+
+    log(`${logPrefix} [selection] Cell context for selection: targetCellIndex=${targetCellIndex}, cellStartColInLine=${cellContentStartColInLine}, cellEndColInLine=${cellContentEndColInLine}, currentCellFullText='${currentCellFullText}'`);
+
+    const isSelectionEntirelyWithinCell =
+      selectionStartColInLine >= cellContentStartColInLine &&
+      selectionEndColInLine <= cellContentEndColInLine;
+
+    log(`${logPrefix} [selection] Checking if selection [${selectionStartColInLine}-${selectionEndColInLine}] is entirely within cell [${cellContentStartColInLine}-${cellContentEndColInLine}]. Result: ${isSelectionEntirelyWithinCell}`);
+
+    if (!isSelectionEntirelyWithinCell) {
+      log(`${logPrefix} [selection] Selection is NOT entirely within cell ${targetCellIndex} or spans delimiters. Preventing default action to protect table structure.`);
+      evt.preventDefault();
+      return true;
+    }
+
+    const isCurrentKeyDelete = evt.key === 'Delete' || evt.keyCode === 46;
+    const isCurrentKeyBackspace = evt.key === 'Backspace' || evt.keyCode === 8;
+    // Check if it's a printable character, not a modifier
+    const isCurrentKeyTyping = evt.key && evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey;
+
+
+    if (isSelectionEntirelyWithinCell && (isCurrentKeyDelete || isCurrentKeyBackspace || isCurrentKeyTyping)) {
+      log(`${logPrefix} [selection] Handling key='${evt.key}' (Type: ${evt.type}) for valid intra-cell selection.`);
+      
+      if (evt.type !== 'keydown') {
+        log(`${logPrefix} [selection] Ignoring non-keydown event type ('${evt.type}') for selection handling. Allowing default.`);
+        return false; 
+      }
+      evt.preventDefault();
+
+      const rangeStart = [currentLineNum, selectionStartColInLine];
+      const rangeEnd = [currentLineNum, selectionEndColInLine];
+      let replacementText = '';
+      let newAbsoluteCaretCol = selectionStartColInLine;
+      const repBeforeEdit = editorInfo.ace_getRep(); // Get rep before edit for attribute helper
+      log(`${logPrefix} [caretTrace] [selection] rep.selStart before ace_performDocumentReplaceRange: Line=${repBeforeEdit.selStart[0]}, Col=${repBeforeEdit.selStart[1]}`);
+
+      if (isCurrentKeyTyping) {
+        replacementText = evt.key;
+        newAbsoluteCaretCol = selectionStartColInLine + replacementText.length;
+        log(`${logPrefix} [selection] -> Replacing selected range [[${rangeStart[0]},${rangeStart[1]}],[${rangeEnd[0]},${rangeEnd[1]}]] with text '${replacementText}'`);
+      } else { // Delete or Backspace
+        log(`${logPrefix} [selection] -> Deleting selected range [[${rangeStart[0]},${rangeStart[1]}],[${rangeEnd[0]},${rangeEnd[1]}]]`);
+      }
+
+      try {
+        // const repBeforeEdit = editorInfo.ace_getRep(); // Get rep before edit for attribute helper - MOVED UP
+        editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, replacementText);
+        const repAfterReplace = editorInfo.ace_getRep();
+        log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_performDocumentReplaceRange: Line=${repAfterReplace.selStart[0]}, Col=${repAfterReplace.selStart[1]}`);
+
+
+        log(`${logPrefix} [selection] -> Re-applying tbljson line attribute...`);
+        const applyHelper = editorInfo.ep_tables5_applyMeta;
+        if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) {
+          const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
+          applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply);
+          log(`${logPrefix} [selection] -> tbljson line attribute re-applied (using rep before edit).`);
+        } else {
+          console.error(`${logPrefix} [selection] -> FAILED to re-apply tbljson attribute (helper or repBeforeEdit missing).`);
+          const currentRepFallback = editorInfo.ace_getRep();
+          if (applyHelper && typeof applyHelper === 'function' && currentRepFallback) {
+            log(`${logPrefix} [selection] -> Retrying attribute application with current rep...`);
+            applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null);
+            log(`${logPrefix} [selection] -> tbljson line attribute re-applied (using current rep fallback).`);
+          } else {
+            console.error(`${logPrefix} [selection] -> FAILED to re-apply tbljson attribute even with fallback rep.`);
+          }
+        }
+
+        log(`${logPrefix} [selection] -> Setting selection/caret to: [${currentLineNum}, ${newAbsoluteCaretCol}]`);
+        log(`${logPrefix} [caretTrace] [selection] rep.selStart before ace_performSelectionChange: Line=${editorInfo.ace_getRep().selStart[0]}, Col=${editorInfo.ace_getRep().selStart[1]}`);
+        editorInfo.ace_performSelectionChange([currentLineNum, newAbsoluteCaretCol], [currentLineNum, newAbsoluteCaretCol], false);
+        const repAfterSelectionChange = editorInfo.ace_getRep();
+        log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_performSelectionChange: Line=${repAfterSelectionChange.selStart[0]}, Col=${repAfterSelectionChange.selStart[1]}`);
+        
+        // Add sync hint AFTER setting selection
+        editorInfo.ace_fastIncorp(1);
+        const repAfterFastIncorp = editorInfo.ace_getRep();
+        log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_fastIncorp: Line=${repAfterFastIncorp.selStart[0]}, Col=${repAfterFastIncorp.selStart[1]}`);
+        log(`${logPrefix} [selection] -> Requested sync hint (fastIncorp 1).`);
+
+        // --- Re-assert selection --- 
+        log(`${logPrefix} [caretTrace] [selection] Attempting to re-assert selection post-fastIncorp to [${currentLineNum}, ${newAbsoluteCaretCol}]`);
+        editorInfo.ace_performSelectionChange([currentLineNum, newAbsoluteCaretCol], [currentLineNum, newAbsoluteCaretCol], false);
+        const repAfterReassert = editorInfo.ace_getRep();
+        log(`${logPrefix} [caretTrace] [selection] rep.selStart after re-asserting selection: Line=${repAfterReassert.selStart[0]}, Col=${repAfterReassert.selStart[1]}`);
+
+        const newRelativePos = newAbsoluteCaretCol - cellStartCol;
+        if (editor) {
+            editor.ep_tables5_last_clicked = {
+                lineNum: currentLineNum,
+                tblId: metadataForTargetLine.tblId,
+                cellIndex: targetCellIndex,
+                relativePos: newRelativePos < 0 ? 0 : newRelativePos
+            };
+            log(`${logPrefix} [selection] -> Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
+        } else {
+            log(`${logPrefix} [selection] -> Editor instance not found, cannot update ep_tables5_last_clicked.`);
+        }
+        
+        log(`${logPrefix} END [selection] (Handled highlight modification) Key='${evt.key}' Type='${evt.type}'. Duration: ${Date.now() - startLogTime}ms`);
+        return true;
+      } catch (error) {
+        log(`${logPrefix} [selection] ERROR during highlight modification:`, error);
+        console.error('[ep_tables5] Error processing highlight modification:', error);
+        return true; // Still return true as we prevented default.
+      }
+    }
+  }
+  // --- END NEW: Handle Highlight Deletion/Replacement ---
+
   // --- Define Key Types ---
   const isTypingKey = evt.key && evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey;
   const isDeleteKey = evt.key === 'Delete' || evt.keyCode === 46;
@@ -665,6 +799,7 @@ exports.aceKeyEvent = (h, ctx) => {
     // *** Use the validated currentLineNum and currentCol derived from relativeCaretPos ***
     const currentCol = cellStartCol + relativeCaretPos;
     log(`${logPrefix} Handling INTERNAL key='${evt.key}' Type='${evt.type}' at Line=${currentLineNum}, Col=${currentCol} (CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}).`);
+    log(`${logPrefix} [caretTrace] Initial rep.selStart for internal edit: Line=${rep.selStart[0]}, Col=${rep.selStart[1]}`);
 
     // Only process keydown events for modifications
     if (evt.type !== 'keydown') {
@@ -680,6 +815,7 @@ exports.aceKeyEvent = (h, ctx) => {
 
     try {
         repBeforeEdit = editorInfo.ace_getRep(); // Get rep *before* making changes
+        log(`${logPrefix} [caretTrace] rep.selStart before ace_performDocumentReplaceRange: Line=${repBeforeEdit.selStart[0]}, Col=${repBeforeEdit.selStart[1]}`);
 
     if (isTypingKey) {
             const insertPos = [currentLineNum, currentCol];
@@ -701,6 +837,9 @@ exports.aceKeyEvent = (h, ctx) => {
             editorInfo.ace_performDocumentReplaceRange(delRangeStart, delRangeEnd, '');
             newAbsoluteCaretCol = currentCol; // Caret stays at the same column for delete
         }
+        const repAfterReplace = editorInfo.ace_getRep();
+        log(`${logPrefix} [caretTrace] rep.selStart after ace_performDocumentReplaceRange: Line=${repAfterReplace.selStart[0]}, Col=${repAfterReplace.selStart[1]}`);
+
 
         // *** CRITICAL: Re-apply the line attribute after ANY modification ***
         log(`${logPrefix} -> Re-applying tbljson line attribute...`);
@@ -726,13 +865,25 @@ exports.aceKeyEvent = (h, ctx) => {
         if (newAbsoluteCaretCol >= 0) {
              const newCaretPos = [currentLineNum, newAbsoluteCaretCol]; // Use the trusted currentLineNum
              log(`${logPrefix} -> Setting selection immediately to:`, newCaretPos);
+             log(`${logPrefix} [caretTrace] rep.selStart before ace_performSelectionChange: Line=${editorInfo.ace_getRep().selStart[0]}, Col=${editorInfo.ace_getRep().selStart[1]}`);
              try {
                 editorInfo.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+                const repAfterSelectionChange = editorInfo.ace_getRep();
+                log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_performSelectionChange: Line=${repAfterSelectionChange.selStart[0]}, Col=${repAfterSelectionChange.selStart[1]}`);
                 log(`${logPrefix} -> Selection set immediately.`);
 
                 // Add sync hint AFTER setting selection
-                editorInfo.ace_fastIncorp(5); 
-                log(`${logPrefix} -> Requested sync hint (fastIncorp 5).`);
+                editorInfo.ace_fastIncorp(1); 
+                const repAfterFastIncorp = editorInfo.ace_getRep();
+                log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_fastIncorp: Line=${repAfterFastIncorp.selStart[0]}, Col=${repAfterFastIncorp.selStart[1]}`);
+                log(`${logPrefix} -> Requested sync hint (fastIncorp 1).`);
+
+                // --- Re-assert selection --- 
+                const targetCaretPosForReassert = [currentLineNum, newAbsoluteCaretCol];
+                log(`${logPrefix} [caretTrace] Attempting to re-assert selection post-fastIncorp to [${targetCaretPosForReassert[0]}, ${targetCaretPosForReassert[1]}]`);
+                editorInfo.ace_performSelectionChange(targetCaretPosForReassert, targetCaretPosForReassert, false);
+                const repAfterReassert = editorInfo.ace_getRep();
+                log(`${logPrefix} [caretTrace] [selection] rep.selStart after re-asserting selection: Line=${repAfterReassert.selStart[0]}, Col=${repAfterReassert.selStart[1]}`);
 
                 // Store the updated caret info for the next event
                 const newRelativePos = newAbsoluteCaretCol - cellStartCol;
@@ -743,6 +894,8 @@ exports.aceKeyEvent = (h, ctx) => {
                     relativePos: newRelativePos
                 };
                 log(`${logPrefix} -> Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
+                log(`${logPrefix} [caretTrace] Updated ep_tables5_last_clicked. Line=${editor.ep_tables5_last_clicked.lineNum}, Cell=${editor.ep_tables5_last_clicked.cellIndex}, RelPos=${editor.ep_tables5_last_clicked.relativePos}`);
+
 
             } catch (selError) {
                  console.error(`${logPrefix} -> ERROR setting selection immediately:`, selError);
@@ -771,6 +924,7 @@ exports.aceKeyEvent = (h, ctx) => {
   log(`${logPrefix} END (Fell Through / Unhandled Case) Key='${evt.key}' Type='${evt.type}'. Allowing default. Duration: ${endLogTimeFinal - startLogTime}ms`);
   // Clear click state if it wasn't handled?
   // if (editor?.ep_tables5_last_clicked) editor.ep_tables5_last_clicked = null;
+  log(`${logPrefix} [caretTrace] Final rep.selStart at end of aceKeyEvent (if unhandled): Line=${rep.selStart[0]}, Col=${rep.selStart[1]}`);
   return false; // Allow default browser/ACE handling
 };
 
@@ -857,6 +1011,13 @@ exports.aceInitialized = (h, ctx) => {
       const lineNum = selStart[0];
       log(`${pasteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
 
+      // NEW: Check if selection spans multiple lines
+      if (selStart[0] !== selEnd[0]) {
+        log(`${pasteLogPrefix} WARNING: Selection spans multiple lines. Preventing paste to protect table structure.`);
+        evt.preventDefault();
+        return;
+      }
+
       log(`${pasteLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
       const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
       if (!lineAttrString) {
@@ -876,10 +1037,37 @@ exports.aceInitialized = (h, ctx) => {
           return; // Allow default
         }
         log(`${pasteLogPrefix} Table metadata validated successfully: tblId=${tableMetadata.tblId}, row=${tableMetadata.row}, cols=${tableMetadata.cols}.`);
-      } catch (e) {
+      } catch(e) {
         console.error(`${pasteLogPrefix} ERROR parsing table metadata for line ${lineNum}:`, e);
         log(`${pasteLogPrefix} Metadata parse error. Allowing default paste. Error details:`, { message: e.message, stack: e.stack });
         return; // Allow default
+      }
+
+      // NEW: Validate selection is within cell boundaries
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+
+      for (let i = 0; i < cells.length; i++) {
+        const cellLength = cells[i]?.length ?? 0;
+        const cellEndColThisIteration = currentOffset + cellLength;
+        
+        if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = cellEndColThisIteration;
+          break;
+        }
+        currentOffset += cellLength + DELIMITER.length;
+      }
+
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
+        log(`${pasteLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing paste to protect table structure.`);
+        evt.preventDefault();
+        return;
       }
 
       log(`${pasteLogPrefix} Accessing clipboard data.`);
@@ -894,12 +1082,18 @@ exports.aceInitialized = (h, ctx) => {
       const pastedTextRaw = clipboardData.getData('text/plain');
       log(`${pasteLogPrefix} Pasted text raw: "${pastedTextRaw}" (Type: ${typeof pastedTextRaw})`);
 
-      // Scrub newlines
-      const pastedText = pastedTextRaw.replace(/(\r\n|\n|\r)/gm, " "); // Replace newlines with a single space
-      log(`${pasteLogPrefix} Pasted text after scrubbing newlines: "${pastedText}"`);
+      // ENHANCED: More thorough sanitization of pasted content
+      let pastedText = pastedTextRaw
+        .replace(/(\r\n|\n|\r)/gm, " ") // Replace newlines with space
+        .replace(/\|/g, " ") // Replace pipe characters with space to prevent delimiter injection
+        .replace(/\t/g, " ") // Replace tabs with space
+        .replace(/\s+/g, " ") // Normalize whitespace
+        .trim(); // Trim leading/trailing whitespace
 
-      if (typeof pastedText !== 'string' || pastedText.trim().length === 0) { // Also check if trimmed text is empty
-        log(`${pasteLogPrefix} No plain text in clipboard or text is empty (after trimming). Allowing default paste.`);
+      log(`${pasteLogPrefix} Pasted text after sanitization: "${pastedText}"`);
+
+      if (typeof pastedText !== 'string' || pastedText.length === 0) {
+        log(`${pasteLogPrefix} No plain text in clipboard or text is empty (after sanitization). Allowing default paste.`);
         const types = clipboardData.types;
         log(`${pasteLogPrefix} Clipboard types available:`, types);
         if (types && types.includes('text/html')) {
@@ -909,6 +1103,25 @@ exports.aceInitialized = (h, ctx) => {
       }
       log(`${pasteLogPrefix} Plain text obtained from clipboard: "${pastedText}". Length: ${pastedText.length}.`);
 
+      // NEW: Check if paste would exceed cell boundaries
+      const currentCellText = cells[targetCellIndex] || '';
+      const selectionLength = selEnd[1] - selStart[1];
+      const newCellLength = currentCellText.length - selectionLength + pastedText.length;
+      
+      // Optional: Add a reasonable maximum cell length if desired
+      const MAX_CELL_LENGTH = 1000; // Example maximum
+      if (newCellLength > MAX_CELL_LENGTH) {
+        log(`${pasteLogPrefix} WARNING: Paste would exceed maximum cell length (${newCellLength} > ${MAX_CELL_LENGTH}). Truncating paste.`);
+        const truncatedPaste = pastedText.substring(0, MAX_CELL_LENGTH - (currentCellText.length - selectionLength));
+        if (truncatedPaste.length === 0) {
+          log(`${pasteLogPrefix} Paste would be completely truncated. Preventing paste.`);
+          evt.preventDefault();
+          return;
+        }
+        log(`${pasteLogPrefix} Using truncated paste: "${truncatedPaste}"`);
+        pastedText = truncatedPaste;
+      }
+
       log(`${pasteLogPrefix} INTERCEPTING paste of plain text into table line ${lineNum}. PREVENTING DEFAULT browser action.`);
       evt.preventDefault();
 
@@ -917,7 +1130,7 @@ exports.aceInitialized = (h, ctx) => {
         ed.ace_callWithAce((aceInstance) => {
             const callAceLogPrefix = `${pasteLogPrefix}[ace_callWithAceOps]`;
             log(`${callAceLogPrefix} Entered ace_callWithAce for paste operations. selStart:`, selStart, `selEnd:`, selEnd);
-
+            
             log(`${callAceLogPrefix} Original line text from initial rep: "${rep.lines.atIndex(lineNum).text}". SelStartCol: ${selStart[1]}, SelEndCol: ${selEnd[1]}.`);
             
             log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to insert text: "${pastedText}".`);
@@ -934,7 +1147,7 @@ exports.aceInitialized = (h, ctx) => {
               tableMetadata.row,
               tableMetadata.cols,
               repAfterReplace,
-              ed, // editorInfo (ctx.editorInfo)
+              ed,
               null
             );
             log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
@@ -949,49 +1162,7 @@ exports.aceInitialized = (h, ctx) => {
             aceInstance.ace_fastIncorp(10);
             log(`${callAceLogPrefix} fastIncorp requested.`);
 
-            log(`${callAceLogPrefix} Attempting to update stored click/caret info (editor.ep_tables5_last_clicked).`);
-            const updatedLineText = aceInstance.ace_getRep().lines.atIndex(lineNum).text;
-            const cells = updatedLineText.split(DELIMITER);
-            let currentOffset = 0;
-            let targetCellIndex = -1;
-            let cellStartCol = 0;
-            log(`${callAceLogPrefix} Recalculating targetCellIndex. Updated line text for split: "${updatedLineText}". Cells found: ${cells.length}`);
-
-            for (let i = 0; i < cells.length; i++) {
-                const cellText = cells[i];
-                const cellLength = cellText.length;
-                const cellEndColThisIteration = currentOffset + cellLength;
-                log(`${callAceLogPrefix} Checking cell ${i}: "${cellText}" (len ${cellLength}). Range: [${currentOffset} - ${cellEndColThisIteration}]. Caret: ${newCaretCol}`);
-                
-                if (newCaretCol >= currentOffset && newCaretCol <= cellEndColThisIteration) {
-                    targetCellIndex = i;
-                    cellStartCol = currentOffset;
-                    log(`${callAceLogPrefix} Caret IN cell ${i}. cellStartCol=${cellStartCol}. Breaking loop.`);
-                    break;
-                }
-                if (i < cells.length - 1) {
-                    const delimiterStartCol = cellEndColThisIteration;
-                    const delimiterEndCol = delimiterStartCol + DELIMITER.length;
-                    if (newCaretCol > delimiterStartCol && newCaretCol <= delimiterEndCol) {
-                        targetCellIndex = i + 1;
-                        cellStartCol = delimiterEndCol;
-                        log(`${callAceLogPrefix} Caret ON DELIMITER after cell ${i}. Moving to cell ${targetCellIndex}. cellStartCol=${cellStartCol}. Breaking loop.`);
-                        break;
-                    }
-                }
-                currentOffset += cellLength + DELIMITER.length;
-            }
-            if (targetCellIndex === -1 && newCaretCol === updatedLineText.length && cells.length > 0) {
-                targetCellIndex = cells.length - 1;
-                cellStartCol = updatedLineText.length - cells[targetCellIndex].length;
-                 log(`${callAceLogPrefix} Caret at END of line after last cell. Target cell ${targetCellIndex}. cellStartCol=${cellStartCol}.`);
-            }
-            if (targetCellIndex === -1 && cells.length > 0) {
-                targetCellIndex = 0;
-                cellStartCol = 0;
-                log(`${callAceLogPrefix} WARNING: Could not determine target cell for caret ${newCaretCol}. Defaulting to cell 0.`);
-            }
-
+            // Update stored click/caret info
             if (editor && editor.ep_tables5_last_clicked && editor.ep_tables5_last_clicked.tblId === tableMetadata.tblId) {
                const newRelativePos = newCaretCol - cellStartCol;
                editor.ep_tables5_last_clicked = {
@@ -1001,15 +1172,14 @@ exports.aceInitialized = (h, ctx) => {
                   relativePos: newRelativePos < 0 ? 0 : newRelativePos,
                };
                log(`${callAceLogPrefix} Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
-            } else {
-                log(`${callAceLogPrefix} Did not update ep_tables5_last_clicked. Conditions not met: editor exists?=${!!editor}, last_clicked exists?=${!!editor?.ep_tables5_last_clicked}, tblId matches?=${editor?.ep_tables5_last_clicked?.tblId === tableMetadata.tblId}`);
             }
+
             log(`${callAceLogPrefix} Paste operations within ace_callWithAce completed successfully.`);
-        }, 'tablePasteTextOperations', true); // Unique name for this task
+        }, 'tablePasteTextOperations', true);
         log(`${pasteLogPrefix} ed.ace_callWithAce for paste operations was called.`);
 
       } catch (error) {
-        console.error(`${pasteLogPrefix} CRITICAL ERROR during paste handling operation (outside ace_callWithAce or if it threw synchronously):`, error);
+        console.error(`${pasteLogPrefix} CRITICAL ERROR during paste handling operation:`, error);
         log(`${pasteLogPrefix} Error details:`, { message: error.message, stack: error.stack });
         log(`${pasteLogPrefix} Paste handling FAILED. END OF HANDLER.`);
       }
@@ -1152,8 +1322,98 @@ exports.aceInitialized = (h, ctx) => {
 // ───────────────────── required no‑op stubs ─────────────────────
 exports.aceStartLineAndCharForPoint = () => { return undefined; };
 exports.aceEndLineAndCharForPoint   = () => { return undefined; };
-exports.aceSetAuthorStyle           = () => {};
-// Return the relative path to the CSS file needed within the editor iframe
+
+// NEW: Style protection for table cells
+exports.aceSetAuthorStyle = (hook, ctx) => {
+  const logPrefix = '[ep_tables5:aceSetAuthorStyle]';
+  log(`${logPrefix} START`, { hook, ctx });
+
+  // If no selection or no style to apply, allow default
+  if (!ctx || !ctx.rep || !ctx.rep.selStart || !ctx.rep.selEnd || !ctx.key) {
+    log(`${logPrefix} No selection or style key. Allowing default.`);
+    return;
+  }
+
+  // Check if selection is within a table
+  const startLine = ctx.rep.selStart[0];
+  const endLine = ctx.rep.selEnd[0];
+  
+  // If selection spans multiple lines, prevent style application
+  if (startLine !== endLine) {
+    log(`${logPrefix} Selection spans multiple lines. Preventing style application to protect table structure.`);
+    return false;
+  }
+
+  // Check if the line is a table line
+  const lineAttrString = ctx.documentAttributeManager?.getAttributeOnLine(startLine, ATTR_TABLE_JSON);
+  if (!lineAttrString) {
+    log(`${logPrefix} Line ${startLine} is not a table line. Allowing default style application.`);
+    return;
+  }
+
+  // List of styles that could break table structure
+  const BLOCKED_STYLES = [
+    'list', 'listType', 'indent', 'align', 'heading', 'code', 'quote',
+    'horizontalrule', 'pagebreak', 'linebreak', 'clear'
+  ];
+
+  if (BLOCKED_STYLES.includes(ctx.key)) {
+    log(`${logPrefix} Blocked potentially harmful style '${ctx.key}' from being applied to table cell.`);
+    return false;
+  }
+
+  // For allowed styles, ensure they only apply within cell boundaries
+  try {
+    const tableMetadata = JSON.parse(lineAttrString);
+    if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+      log(`${logPrefix} Invalid table metadata. Preventing style application.`);
+      return false;
+    }
+
+    const lineText = ctx.rep.lines.atIndex(startLine)?.text || '';
+    const cells = lineText.split(DELIMITER);
+    let currentOffset = 0;
+    let selectionStartCell = -1;
+    let selectionEndCell = -1;
+
+    // Find which cells the selection spans
+    for (let i = 0; i < cells.length; i++) {
+      const cellLength = cells[i]?.length ?? 0;
+      const cellEndCol = currentOffset + cellLength;
+      
+      if (ctx.rep.selStart[1] >= currentOffset && ctx.rep.selStart[1] <= cellEndCol) {
+        selectionStartCell = i;
+      }
+      if (ctx.rep.selEnd[1] >= currentOffset && ctx.rep.selEnd[1] <= cellEndCol) {
+        selectionEndCell = i;
+      }
+      currentOffset += cellLength + DELIMITER.length;
+    }
+
+    // If selection spans multiple cells, prevent style application
+    if (selectionStartCell !== selectionEndCell) {
+      log(`${logPrefix} Selection spans multiple cells. Preventing style application to protect table structure.`);
+      return false;
+    }
+
+    // If selection includes cell delimiters, prevent style application
+    const cellStartCol = cells.slice(0, selectionStartCell).reduce((acc, cell) => acc + cell.length + DELIMITER.length, 0);
+    const cellEndCol = cellStartCol + cells[selectionStartCell].length;
+    
+    if (ctx.rep.selStart[1] <= cellStartCol || ctx.rep.selEnd[1] >= cellEndCol) {
+      log(`${logPrefix} Selection includes cell delimiters. Preventing style application to protect table structure.`);
+      return false;
+    }
+
+    log(`${logPrefix} Style '${ctx.key}' allowed within cell boundaries.`);
+    return; // Allow the style to be applied
+  } catch (e) {
+    console.error(`${logPrefix} Error processing style application:`, e);
+    log(`${logPrefix} Error details:`, { message: e.message, stack: e.stack });
+    return false; // Prevent style application on error
+  }
+};
+
 exports.aceEditorCSS                = () => { 
   // Path relative to Etherpad's static/plugins/ directory
   // Format should be: pluginName/path/to/file.css
@@ -1256,6 +1516,76 @@ exports.postAceInit = (hookName, ctx) => {
   }, 'tableCellSelectionPostAce', true); // Unique name for callstack
 
   log(`${func} END`);
+};
+
+// NEW: Undo/Redo protection
+exports.aceUndoRedo = (hook, ctx) => {
+  const logPrefix = '[ep_tables5:aceUndoRedo]';
+  log(`${logPrefix} START`, { hook, ctx });
+
+  if (!ctx || !ctx.rep || !ctx.rep.selStart || !ctx.rep.selEnd) {
+    log(`${logPrefix} No selection or context. Allowing default.`);
+    return;
+  }
+
+  // Get the affected line range
+  const startLine = ctx.rep.selStart[0];
+  const endLine = ctx.rep.selEnd[0];
+
+  // Check if any affected lines are table lines
+  let hasTableLines = false;
+  let tableLines = [];
+
+  for (let line = startLine; line <= endLine; line++) {
+    const lineAttrString = ctx.documentAttributeManager?.getAttributeOnLine(line, ATTR_TABLE_JSON);
+    if (lineAttrString) {
+      hasTableLines = true;
+      tableLines.push(line);
+    }
+  }
+
+  if (!hasTableLines) {
+    log(`${logPrefix} No table lines affected. Allowing default undo/redo.`);
+    return;
+  }
+
+  log(`${logPrefix} Table lines affected:`, { tableLines });
+
+  // Validate table structure after undo/redo
+  try {
+    for (const line of tableLines) {
+      const lineAttrString = ctx.documentAttributeManager?.getAttributeOnLine(line, ATTR_TABLE_JSON);
+      if (!lineAttrString) continue;
+
+      const tableMetadata = JSON.parse(lineAttrString);
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+        log(`${logPrefix} Invalid table metadata after undo/redo. Attempting recovery.`);
+        // Attempt to recover table structure
+        const lineText = ctx.rep.lines.atIndex(line)?.text || '';
+        const cells = lineText.split(DELIMITER);
+        
+        // If we have valid cells, try to reconstruct the table metadata
+        if (cells.length > 1) {
+          const newMetadata = {
+            cols: cells.length,
+            rows: 1,
+            cells: cells.map((_, i) => ({ col: i, row: 0 }))
+          };
+          
+          // Apply the recovered metadata
+          ctx.documentAttributeManager.setAttributeOnLine(line, ATTR_TABLE_JSON, JSON.stringify(newMetadata));
+          log(`${logPrefix} Recovered table structure for line ${line}`);
+        } else {
+          // If we can't recover, remove the table attribute
+          ctx.documentAttributeManager.removeAttributeOnLine(line, ATTR_TABLE_JSON);
+          log(`${logPrefix} Removed invalid table attribute from line ${line}`);
+        }
+      }
+    }
+  } catch (e) {
+    console.error(`${logPrefix} Error during undo/redo validation:`, e);
+    log(`${logPrefix} Error details:`, { message: e.message, stack: e.stack });
+  }
 };
 
 // END OF FILE
