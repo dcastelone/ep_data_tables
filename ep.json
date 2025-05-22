@@ -6,10 +6,12 @@
 		  "eejsBlock_styles"           : "ep_tables5/static/js/index:eejsBlock_styles",
 		  "eejsBlock_scripts"          : "ep_tables5/static/js/index:eejsBlock_scripts",
 		  "eejsBlock_editbarMenuLeft"  : "ep_tables5/static/js/index:eejsBlock_editbarMenuLeft",
-		  "getLineHTMLForExport"       : "ep_tables5/export2html:getLineHTMLForExport"
+		  "getLineHTMLForExport"       : "ep_tables5/export2html:getLineHTMLForExport",
+      "import"                     : "ep_tables5/tableImport:import",
+      "collectContentPre"          : "ep_tables5/collectContentPre:collectContentPre" 
 		},
   		"client_hooks": {
-		  "collectContentPre"      : "ep_tables5/static/js/collector_hooks:collectContentPre",
+		  "collectContentPre"      : "ep_tables5/static/js/client_hooks:collectContentPre",
 		  "collectContentLineBreak": "ep_tables5/static/js/collector_hooks:collectContentLineBreak",
 		  "collectContentLineText" : "ep_tables5/static/js/collector_hooks:collectContentLineText",
 		  "aceKeyEvent"                 : "ep_tables5/static/js/client_hooks:aceKeyEvent",

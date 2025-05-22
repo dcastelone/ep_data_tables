@@ -28,7 +28,15 @@ const dec = s => {
     // Revert to simpler decode, assuming enc provides valid padding
     const str = s.replace(/-/g, '+').replace(/_/g, '/');
     try {
-        return atob(str);
+        if (typeof atob === 'function') {
+            return atob(str); // Browser environment
+        } else if (typeof Buffer === 'function') {
+            // Node.js environment
+            return Buffer.from(str, 'base64').toString('utf8');
+        } else {
+            console.error('[ep_tables5] Base64 decoding function (atob or Buffer) not found.');
+            return null;
+        }
     } catch (e) {
         console.error('[ep_tables5] Error decoding base64 string:', s, e);
         return null;
@@ -42,11 +50,27 @@ let lastClickedCellInfo = null; // { lineNum: number, cellIndex: number, tblId: 
 exports.collectContentPre = (hook, ctx) => {
   const funcName = 'collectContentPre';
   const node = ctx.dom;
-  const rep = ctx?.rep;
-  const docAttrManager = ctx?.documentAttributeManager;
+  // !!!!! VERY IMPORTANT DIAGNOSTIC LOG !!!!!
+  console.log(`[ep_tables5:client_hooks] ${funcName}: ENTERING HOOK. Node Tag: ${node?.tagName}, Node Class: ${node?.className}, Node Type: ${node?.nodeType}`);
+  if (node && typeof node.getAttribute === 'function') {
+    console.log(`[ep_tables5:client_hooks] ${funcName}: Node outerHTML (first 250 chars): ${(node.outerHTML || '').substring(0,250)}`);
+  }
 
   // Log entry point
-  log(`${funcName}: START - Processing node ID: ${node?.id}, Class: ${node?.className}`);
+  log(`${funcName}: START - Processing node ID: ${node?.id}, Class: ${node?.className}, Tag: ${node?.tagName}`);
+  if (node?.tagName === 'DIV') {
+    log(`${funcName} (${node?.id}): Server-side DIV check. OuterHTML: ${node.outerHTML ? node.outerHTML.substring(0, 200) + (node.outerHTML.length > 200 ? '...':'') : '[No outerHTML]'}`);
+    // Check if this DIV contains our target SPAN (Now P)
+    const childP = node.querySelector('p[class*="tbljson-"]');
+    if (childP) {
+        log(`${funcName} (${node?.id}): DIV contains a tbljson- P. Will process P directly if it comes up.`);
+    }
+  } else if (node?.tagName === 'P') {
+     log(`${funcName} (${node?.id}): Server-side P check. Class: ${node?.className}. OuterHTML: ${node.outerHTML ? node.outerHTML.substring(0, 200) + (node.outerHTML.length > 200 ? '...':'') : '[No outerHTML]'}`);
+  }
+
+  // !!!!! DIAGNOSTIC LOG BEFORE P CHECK !!!!!
+  // Removed the P check diagnostic log as the P-specific block is being removed.
 
   // --- Check if it's a line DIV that WE rendered as a table --- 
   // We need to reliably identify lines managed by this plugin.
@@ -65,23 +89,24 @@ exports.collectContentPre = (hook, ctx) => {
 
   // --- 1. Retrieve Existing Metadata Attribute --- 
   let existingMetadata = null;
+  const rep = ctx?.rep; // Ensure rep is defined in this scope if not already
+  const docAttrManager = ctx?.documentAttributeManager; // Ensure docAttrManager is defined
+
   const lineNum = rep?.lines?.indexOfKey(node.id); // Get line number
   log(`${funcName} (${node?.id}): Determined line number: ${lineNum}`);
 
   if (typeof lineNum !== 'number' || lineNum < 0 || !docAttrManager) {
-    console.error(`[ep_tables5] ${funcName} (${node?.id}): Could not get valid line number (${lineNum}) or docAttrManager. Cannot preserve metadata.`);
-    log(`${funcName} (${node?.id}): Aborting custom collection due to missing lineNum/docAttrManager.`);
-    // Maybe return undefined to prevent default, but state is inconsistent?
-    // Let's allow default for now to avoid breaking things further.
-    return;
+    console.error(`[ep_tables5] ${funcName} (${node?.id}): Could not get valid line number (${lineNum}) or docAttrManager. Aborting table collection for this line.`);
+    log(`${funcName} (${node?.id}): Aborting custom collection due to missing lineNum/docAttrManager. Current node outerHTML:`, node.outerHTML?.substring(0, 500));
+    return; // Allow default handlers if we can't get line info or manager
   }
 
          try { 
     const existingAttrString = docAttrManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
-    log(`${funcName} (${node?.id}): Retrieved existing attribute string for line ${lineNum}:`, existingAttrString);
+    log(`${funcName} (${node?.id}): For line ${lineNum}, retrieved existing ATTR_TABLE_JSON string:`, existingAttrString);
     if (existingAttrString) {
       existingMetadata = JSON.parse(existingAttrString);
-      log(`${funcName} (${node?.id}): Parsed existing metadata:`, existingMetadata);
+      log(`${funcName} (${node?.id}): Parsed existing metadata for line ${lineNum}:`, existingMetadata);
       // Basic validation of retrieved metadata
       if (!existingMetadata || typeof existingMetadata.tblId === 'undefined' || typeof existingMetadata.row === 'undefined' || typeof existingMetadata.cols !== 'number') {
         log(`${funcName} (${node?.id}): Warning - Existing metadata is invalid/incomplete. Proceeding cautiously.`);
@@ -349,40 +374,26 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // --- End Metadata Parsing ---
 
   // --- 2. Get and Parse Line Content ---
-  const lineInnerHTML = node.innerHTML;
-  log(`${logPrefix} NodeID#${nodeId}: Parsing line content via Placeholder Replace/Split...`);
-  log(`${logPrefix} NodeID#${nodeId}: Original node.innerHTML:`, lineInnerHTML);
+  // ALWAYS get the innerHTML of the line div itself. 
+  // This innerHTML is set by Etherpad based on the line's current text in atext.
+  // For an imported line's first render, atext is "Cell1|Cell2", so node.innerHTML will be "Cell1|Cell2".
+  // For a natively created line, node.innerHTML is also "Cell1|Cell2".
+  // After an edit, aceKeyEvent updates atext, and node.innerHTML reflects that new "EditedCell1|Cell2" string.
+  const delimitedTextFromLine = node.innerHTML;
+  log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text. Value: "${(delimitedTextFromLine || '').substring(0,100)}..."`);
+  
+  // The DELIMITER const is defined at the top of this file.
+  const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER); 
 
-  let htmlSegments = [];
-  // Define a unique placeholder unlikely to be in content
-  const PLACEHOLDER = '@@EP_TABLES5_DELIM@@'; 
+  log(`${logPrefix} NodeID#${nodeId}: Parsed HTML segments (${htmlSegments.length}):`, htmlSegments.map(s => (s || '').substring(0,50) + (s && s.length > 50 ? '...' : '')));
 
-  try {
-      // Replace the simple pipe delimiter with the placeholder
-      // Need to use a RegExp with the global flag for replaceAll behavior
-      // Escape the pipe for RegExp: \|
-      const replacedHtml = lineInnerHTML.replace(new RegExp('\\|', 'g'), PLACEHOLDER);
-      log(`${logPrefix} NodeID#${nodeId}: innerHTML after replacing delimiter ('|') with placeholder:`, replacedHtml);
-
-      // Split the string using the placeholder
-      htmlSegments = replacedHtml.split(PLACEHOLDER);
-      log(`${logPrefix} NodeID#${nodeId}: Final parsed HTML segments (${htmlSegments.length}) after splitting by placeholder:`, htmlSegments);
-
-      // --- Validation --- 
-      if (htmlSegments.length !== rowMetadata.cols) {
-          log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Table structure might be incorrect.`);
-          console.warn(`[ep_tables5] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
-      } else {
-          log(`${logPrefix} NodeID#${nodeId}: Parsed segment count matches metadata cols (${rowMetadata.cols}).`);
-      }
-  } catch (parseError) {
-      log(`${logPrefix} NodeID#${nodeId}: ERROR during placeholder replace/split parsing. Cannot build table.`, parseError);
-      console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error parsing line content via placeholder replace/split.`, parseError);
-      node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Could not parse table cell content.</div>';
-      log(`${logPrefix} NodeID#${nodeId}: Rendered parse error message in node. END.`);
-      return cb();
+  // --- Validation --- 
+  if (htmlSegments.length !== rowMetadata.cols) {
+      log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Table structure might be incorrect.`);
+      console.warn(`[ep_tables5] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
+  } else {
+      log(`${logPrefix} NodeID#${nodeId}: Parsed segment count matches metadata cols (${rowMetadata.cols}).`);
   }
-  // --- End Content Parsing ---
 
   // --- 3. Build and Render Table ---
   log(`${logPrefix} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
