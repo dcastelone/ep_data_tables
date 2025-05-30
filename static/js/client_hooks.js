@@ -301,32 +301,33 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
 
   // --- 1. Find and Parse Metadata Attribute --- 
   log(`${logPrefix} NodeID#${nodeId}: Searching for tbljson-* class...`);
-  // Check the node itself first
-  if (node.classList) {
-      for (const cls of node.classList) { 
-          if (cls.startsWith('tbljson-')) {
-              encodedJsonString = cls.substring(8);
-              log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson on node itself: ${encodedJsonString}`);
-              break;
+  
+  // Helper function to recursively search for tbljson class in all descendants
+  function findTbljsonClass(element) {
+    // Check the element itself
+    if (element.classList) {
+      for (const cls of element.classList) {
+        if (cls.startsWith('tbljson-')) {
+          return cls.substring(8);
+        }
       }
-  } 
+    }
+    // Recursively check all descendants
+    if (element.children) {
+      for (const child of element.children) {
+        const found = findTbljsonClass(child);
+        if (found) return found;
+      }
+    }
+    return null;
   }
-  // Check children if not found on node
-  if (!encodedJsonString && node.children) {
-       // log(`${logPrefix} NodeID#${nodeId}: Not found on node, checking children...`);
-        for (const child of node.children) {
-             if (child.classList) {
-                for (const cls of child.classList) {
-                 if (cls.startsWith('tbljson-')) {
-                     encodedJsonString = cls.substring(8);
-                     log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson on child ${child.tagName}: ${encodedJsonString}`);
-                     break;
-                 }
-              }
-          } 
-          if (encodedJsonString) break;
-      }
-  } 
+
+  // Search for tbljson class starting from the node
+  encodedJsonString = findTbljsonClass(node);
+  
+  if (encodedJsonString) {
+    log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson class: ${encodedJsonString}`);
+  }
 
   // If no attribute found, it's not a table line managed by us
   if (!encodedJsonString) {
@@ -374,16 +375,18 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // --- End Metadata Parsing ---
 
   // --- 2. Get and Parse Line Content ---
-  // ALWAYS get the innerHTML of the line div itself. 
-  // This innerHTML is set by Etherpad based on the line's current text in atext.
+  // ALWAYS get the innerHTML of the line div itself to preserve all styling spans and attributes.
+  // This innerHTML is set by Etherpad based on the line's current text in atext and includes
+  // all the span elements with author colors, bold, italic, and other styling.
   // For an imported line's first render, atext is "Cell1|Cell2", so node.innerHTML will be "Cell1|Cell2".
   // For a natively created line, node.innerHTML is also "Cell1|Cell2".
   // After an edit, aceKeyEvent updates atext, and node.innerHTML reflects that new "EditedCell1|Cell2" string.
+  // When styling is applied, it will include spans like: <span class="author-xxx bold">Cell1</span>|<span class="author-yyy italic">Cell2</span>
   const delimitedTextFromLine = node.innerHTML;
-  log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text. Value: "${(delimitedTextFromLine || '').substring(0,100)}..."`);
+  log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text to preserve styling. Value: "${(delimitedTextFromLine || '').substring(0,100)}..."`);
   
   // The DELIMITER const is defined at the top of this file.
-  const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER); 
+  const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER);
 
   log(`${logPrefix} NodeID#${nodeId}: Parsed HTML segments (${htmlSegments.length}):`, htmlSegments.map(s => (s || '').substring(0,50) + (s && s.length > 50 ? '...' : '')));
 
@@ -399,10 +402,51 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   log(`${logPrefix} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
       try {
       const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, htmlSegments);
-      log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing node.innerHTML.`);
-      // Replace the node's content entirely with the generated table
-      node.innerHTML = newTableHTML;
-      log(`${logPrefix} NodeID#${nodeId}: Successfully replaced node.innerHTML with new table structure.`);
+      log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing content.`);
+      
+      // Find the element that contains the tbljson class to determine if we need to preserve block wrappers
+      function findTbljsonElement(element) {
+        // Check if this element has the tbljson class
+        if (element.classList) {
+          for (const cls of element.classList) {
+            if (cls.startsWith('tbljson-')) {
+              return element;
+            }
+          }
+        }
+        // Recursively check children
+        if (element.children) {
+          for (const child of element.children) {
+            const found = findTbljsonElement(child);
+            if (found) return found;
+          }
+        }
+        return null;
+      }
+      
+      const tbljsonElement = findTbljsonElement(node);
+      
+      // If we found a tbljson element and it's nested in a block element, 
+      // we need to preserve the block wrapper while replacing the content
+      if (tbljsonElement && tbljsonElement.parentElement && tbljsonElement.parentElement !== node) {
+        // Check if the parent is a block-level element that should be preserved
+        const parentTag = tbljsonElement.parentElement.tagName.toLowerCase();
+        const blockElements = ['center', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'right', 'left', 'ul', 'ol', 'li', 'code'];
+        
+        if (blockElements.includes(parentTag)) {
+          log(`${logPrefix} NodeID#${nodeId}: Preserving block element ${parentTag} and replacing its content with table.`);
+          tbljsonElement.parentElement.innerHTML = newTableHTML;
+        } else {
+          log(`${logPrefix} NodeID#${nodeId}: Parent element ${parentTag} is not a block element, replacing entire node content.`);
+          node.innerHTML = newTableHTML;
+        }
+      } else {
+        // Replace the node's content entirely with the generated table
+        log(`${logPrefix} NodeID#${nodeId}: No nested block element found, replacing entire node content.`);
+        node.innerHTML = newTableHTML;
+      }
+      
+      log(`${logPrefix} NodeID#${nodeId}: Successfully replaced content with new table structure.`);
       } catch (renderError) {
       log(`${logPrefix} NodeID#${nodeId}: ERROR during table building or rendering.`, renderError);
       console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error building/rendering table.`, renderError);
@@ -457,7 +501,51 @@ exports.aceKeyEvent = (h, ctx) => {
   let tableMetadata = null;
   let lineAttrString = null; // Store for potential use later
   try {
+    // Add debugging to see what's happening with attribute retrieval
+    log(`${logPrefix} DEBUG: Attempting to get ${ATTR_TABLE_JSON} attribute from line ${reportedLineNum}`);
     lineAttrString = docManager.getAttributeOnLine(reportedLineNum, ATTR_TABLE_JSON);
+    log(`${logPrefix} DEBUG: getAttributeOnLine returned: ${lineAttrString ? `"${lineAttrString}"` : 'null/undefined'}`);
+    
+    // Also check if there are any attributes on this line at all
+    if (typeof docManager.getAttributesOnLine === 'function') {
+      try {
+        const allAttribs = docManager.getAttributesOnLine(reportedLineNum);
+        log(`${logPrefix} DEBUG: All attributes on line ${reportedLineNum}:`, allAttribs);
+      } catch(e) {
+        log(`${logPrefix} DEBUG: Error getting all attributes:`, e);
+      }
+    }
+    
+    // NEW: Check if there's a table in the DOM even though attribute is missing
+    if (!lineAttrString) {
+      try {
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(reportedLineNum);
+        if (lineEntry && lineEntry.lineNode) {
+          const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+          if (tableInDOM) {
+            const domTblId = tableInDOM.getAttribute('data-tblId');
+            const domRow = tableInDOM.getAttribute('data-row');
+            log(`${logPrefix} DEBUG: Found table in DOM without attribute! TblId=${domTblId}, Row=${domRow}`);
+            // Try to reconstruct the metadata from DOM
+            const domCells = tableInDOM.querySelectorAll('td');
+            if (domTblId && domRow !== null && domCells.length > 0) {
+              log(`${logPrefix} DEBUG: Attempting to reconstruct metadata from DOM...`);
+              const reconstructedMetadata = {
+                tblId: domTblId,
+                row: parseInt(domRow, 10),
+                cols: domCells.length
+              };
+              lineAttrString = JSON.stringify(reconstructedMetadata);
+              log(`${logPrefix} DEBUG: Reconstructed metadata: ${lineAttrString}`);
+            }
+          }
+        }
+      } catch(e) {
+        log(`${logPrefix} DEBUG: Error checking DOM for table:`, e);
+      }
+    }
+    
     if (lineAttrString) {
         tableMetadata = JSON.parse(lineAttrString);
         if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
@@ -465,6 +553,7 @@ exports.aceKeyEvent = (h, ctx) => {
              tableMetadata = null; // Ensure it's null if invalid
         }
     } else {
+        log(`${logPrefix} DEBUG: No ${ATTR_TABLE_JSON} attribute found on line ${reportedLineNum}`);
         // Not a table line based on reported caret line
     }
   } catch(e) {
@@ -494,8 +583,14 @@ exports.aceKeyEvent = (h, ctx) => {
       let storedLineAttrString = null;
       let storedLineMetadata = null;
       try {
+          log(`${logPrefix} DEBUG: Getting ${ATTR_TABLE_JSON} attribute from stored line ${lastClick.lineNum}`);
           storedLineAttrString = docManager.getAttributeOnLine(lastClick.lineNum, ATTR_TABLE_JSON);
-          if (storedLineAttrString) storedLineMetadata = JSON.parse(storedLineAttrString);
+          log(`${logPrefix} DEBUG: Stored line attribute result: ${storedLineAttrString ? `"${storedLineAttrString}"` : 'null/undefined'}`);
+          
+          if (storedLineAttrString) {
+            storedLineMetadata = JSON.parse(storedLineAttrString);
+            log(`${logPrefix} DEBUG: Parsed stored metadata:`, storedLineMetadata);
+          }
           
           // Check if metadata is valid and tblId matches
           if (storedLineMetadata && typeof storedLineMetadata.cols === 'number' && storedLineMetadata.tblId === lastClick.tblId) {
@@ -503,7 +598,7 @@ exports.aceKeyEvent = (h, ctx) => {
               trustedLastClick = true;
               currentLineNum = lastClick.lineNum; 
               targetCellIndex = lastClick.cellIndex;
-              metadataForTargetLine = storedLineMetadata; 
+              metadataForTargetLine = storedLineMetadata;
               lineAttrString = storedLineAttrString; // Use the validated attr string
               
               lineText = rep.lines.atIndex(currentLineNum)?.text || '';
@@ -697,14 +792,14 @@ exports.aceKeyEvent = (h, ctx) => {
         const applyHelper = editorInfo.ep_tables5_applyMeta;
         if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) {
           const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
-          applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply);
+          applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply, docManager);
           log(`${logPrefix} [selection] -> tbljson line attribute re-applied (using rep before edit).`);
         } else {
           console.error(`${logPrefix} [selection] -> FAILED to re-apply tbljson attribute (helper or repBeforeEdit missing).`);
           const currentRepFallback = editorInfo.ace_getRep();
           if (applyHelper && typeof applyHelper === 'function' && currentRepFallback) {
             log(`${logPrefix} [selection] -> Retrying attribute application with current rep...`);
-            applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null);
+            applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null, docManager);
             log(`${logPrefix} [selection] -> tbljson line attribute re-applied (using current rep fallback).`);
           } else {
             console.error(`${logPrefix} [selection] -> FAILED to re-apply tbljson attribute even with fallback rep.`);
@@ -858,14 +953,14 @@ exports.aceKeyEvent = (h, ctx) => {
         if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) { 
              // Pass the original lineAttrString if available AND if it belongs to the currentLineNum
              const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
-             applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply);
+             applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply, docManager);
              log(`${logPrefix} -> tbljson line attribute re-applied (using rep before edit).`);
                 } else {
              console.error(`${logPrefix} -> FAILED to re-apply tbljson attribute (helper or repBeforeEdit missing).`);
              const currentRepFallback = editorInfo.ace_getRep();
              if (applyHelper && typeof applyHelper === 'function' && currentRepFallback) {
                  log(`${logPrefix} -> Retrying attribute application with current rep...`);
-                 applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null); // Cannot guarantee old attr string is valid here
+                 applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, currentRepFallback, editorInfo, null, docManager); // Cannot guarantee old attr string is valid here
                  log(`${logPrefix} -> tbljson line attribute re-applied (using current rep fallback).`);
             } else {
                   console.error(`${logPrefix} -> FAILED to re-apply tbljson attribute even with fallback rep.`);
@@ -1159,7 +1254,8 @@ exports.aceInitialized = (h, ctx) => {
               tableMetadata.cols,
               repAfterReplace,
               ed,
-              null
+              null,
+              docManager
             );
             log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
 
@@ -1201,9 +1297,9 @@ exports.aceInitialized = (h, ctx) => {
   // *** END ADDED: Paste event listener ***
 
   // Helper function to apply the metadata attribute to a line
-  function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null) {
+  function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null, documentAttributeManager = null) {
     const funcName = 'applyTableLineMetadataAttribute';
-    log(`${logPrefix}:${funcName}: Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
+    log(`${logPrefix}:${funcName}: START - Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
 
     // If attributeString is not provided, construct it. Otherwise, use the provided one.
     if (!attributeString) {
@@ -1232,13 +1328,64 @@ exports.aceInitialized = (h, ctx) => {
        const effectiveLineLength = Math.max(1, lineLength); 
        log(`${logPrefix}:${funcName}: Line ${lineNum} current text length (from live rep): ${lineLength}. Effective length for attribute: ${effectiveLineLength}. Line text: "${lineEntry.text}"`);
 
+       // Get existing attributes on the line to preserve them (especially block attributes)
+       const docManager = documentAttributeManager || editorInfo?.documentAttributeManager;
+       let existingAttributes = [];
+       
+       log(`${logPrefix}:${funcName}: DEBUG - docManager available: ${!!docManager}`);
+       log(`${logPrefix}:${funcName}: DEBUG - getAttributesOnLine method: ${typeof docManager?.getAttributesOnLine}`);
+       log(`${logPrefix}:${funcName}: DEBUG - getAttributeOnLine method: ${typeof docManager?.getAttributeOnLine}`);
+       
+       if (docManager && typeof docManager.getAttributesOnLine === 'function') {
+         try {
+           // Get all attributes currently on this line
+           const lineAttribs = docManager.getAttributesOnLine(lineNum);
+           log(`${logPrefix}:${funcName}: DEBUG - getAttributesOnLine result:`, lineAttribs);
+           if (lineAttribs && typeof lineAttribs === 'object') {
+             // Convert to the format expected by ace_performDocumentApplyAttributesToRange
+             for (const [key, value] of Object.entries(lineAttribs)) {
+               if (key !== ATTR_TABLE_JSON) { // Don't duplicate the tbljson attribute
+                 existingAttributes.push([key, value]);
+                 log(`${logPrefix}:${funcName}: Preserving existing attribute: ${key}=${value}`);
+               }
+             }
+           }
+         } catch (e) {
+           log(`${logPrefix}:${funcName}: Warning - Could not get existing attributes via getAttributesOnLine, proceeding with fallback:`, e);
+         }
+       } 
+       
+       if (existingAttributes.length === 0 && docManager && typeof docManager.getAttributeOnLine === 'function') {
+         // Fallback: try to get common block attributes individually
+         log(`${logPrefix}:${funcName}: DEBUG - Using fallback individual attribute retrieval`);
+         const commonBlockAttribs = ['align', 'center', 'heading', 'list', 'indent'];
+         for (const attrKey of commonBlockAttribs) {
+           try {
+             const attrValue = docManager.getAttributeOnLine(lineNum, attrKey);
+             if (attrValue) {
+               existingAttributes.push([attrKey, attrValue]);
+               log(`${logPrefix}:${funcName}: Preserving existing block attribute: ${attrKey}=${attrValue}`);
+             }
+           } catch (e) {
+             // Ignore errors for individual attributes
+             log(`${logPrefix}:${funcName}: DEBUG - Error getting individual attribute ${attrKey}:`, e);
+           }
+         }
+       } else if (!docManager) {
+         log(`${logPrefix}:${funcName}: Warning - No documentAttributeManager available, cannot preserve existing attributes.`);
+       }
+
+       // Combine existing attributes with the new tbljson attribute
+       const allAttributes = [...existingAttributes, [ATTR_TABLE_JSON, attributeString]];
+       log(`${logPrefix}:${funcName}: Applying all attributes:`, allAttributes);
+
        // Use ace_performDocumentApplyAttributesToRange
-       // *** Apply attribute to the FULL line range ***
+       // *** Apply all attributes to the FULL line range ***
        const start = [lineNum, 0];
        const end = [lineNum, effectiveLineLength]; // Use potentially corrected length
-       log(`${logPrefix}:${funcName}: Applying attribute via ace_performDocumentApplyAttributesToRange to range [${start}]-[${end}]`);
-       editorInfo.ace_performDocumentApplyAttributesToRange(start, end, [[ATTR_TABLE_JSON, attributeString]]);
-       log(`${logPrefix}:${funcName}: Applied METADATA attribute to line ${lineNum} over range [${start}]-[${end}].`);
+       log(`${logPrefix}:${funcName}: Applying attributes via ace_performDocumentApplyAttributesToRange to range [${start}]-[${end}]`);
+       editorInfo.ace_performDocumentApplyAttributesToRange(start, end, allAttributes);
+       log(`${logPrefix}:${funcName}: Applied all attributes to line ${lineNum} over range [${start}]-[${end}].`);
     } catch(e) {
         console.error(`[ep_tables5] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
         log(`[ep_tables5] ${logPrefix}:${funcName}: Error details:`, { message: e.message, stack: e.stack });
@@ -1298,7 +1445,8 @@ exports.aceInitialized = (h, ctx) => {
       const lineNumToApply = initialStartLine + r;
       log(`${funcName}: -> Processing row ${r} on line ${lineNumToApply}`);
       // Call the module-level helper, passing necessary context (currentRep, ed)
-      applyTableLineMetadataAttribute(lineNumToApply, tblId, r, cols, currentRep, ed); 
+      // Note: documentAttributeManager not available in this context for new table creation
+      applyTableLineMetadataAttribute(lineNumToApply, tblId, r, cols, currentRep, ed, null, null); 
     }
     log(`${funcName}: Finished applying metadata attributes.`);
     log(`${funcName}: Requesting attribute sync (ace_fastIncorp 20)...`);
