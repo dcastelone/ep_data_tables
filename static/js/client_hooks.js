@@ -307,7 +307,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     // Check the element itself
     if (element.classList) {
       for (const cls of element.classList) {
-        if (cls.startsWith('tbljson-')) {
+          if (cls.startsWith('tbljson-')) {
           return cls.substring(8);
         }
       }
@@ -327,7 +327,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   
   if (encodedJsonString) {
     log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson class: ${encodedJsonString}`);
-  }
+  } 
 
   // If no attribute found, it's not a table line managed by us
   if (!encodedJsonString) {
@@ -386,7 +386,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text to preserve styling. Value: "${(delimitedTextFromLine || '').substring(0,100)}..."`);
   
   // The DELIMITER const is defined at the top of this file.
-  const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER);
+  const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER); 
 
   log(`${logPrefix} NodeID#${nodeId}: Parsed HTML segments (${htmlSegments.length}):`, htmlSegments.map(s => (s || '').substring(0,50) + (s && s.length > 50 ? '...' : '')));
 
@@ -441,9 +441,9 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
           node.innerHTML = newTableHTML;
         }
       } else {
-        // Replace the node's content entirely with the generated table
+      // Replace the node's content entirely with the generated table
         log(`${logPrefix} NodeID#${nodeId}: No nested block element found, replacing entire node content.`);
-        node.innerHTML = newTableHTML;
+      node.innerHTML = newTableHTML;
       }
       
       log(`${logPrefix} NodeID#${nodeId}: Successfully replaced content with new table structure.`);
@@ -598,7 +598,7 @@ exports.aceKeyEvent = (h, ctx) => {
               trustedLastClick = true;
               currentLineNum = lastClick.lineNum; 
               targetCellIndex = lastClick.cellIndex;
-              metadataForTargetLine = storedLineMetadata;
+              metadataForTargetLine = storedLineMetadata; 
               lineAttrString = storedLineAttrString; // Use the validated attr string
               
               lineText = rep.lines.atIndex(currentLineNum)?.text || '';
@@ -1045,6 +1045,11 @@ exports.aceInitialized = (h, ctx) => {
   ed.ep_tables5_applyMeta = applyTableLineMetadataAttribute;
   log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta successfully.`);
 
+  // Store the documentAttributeManager reference for later use
+  log(`${logPrefix} Storing documentAttributeManager reference on editorInfo.`);
+  ed.ep_tables5_docManager = docManager;
+  log(`${logPrefix}: Stored documentAttributeManager reference as ed.ep_tables5_docManager.`);
+
   // *** ADDED: Paste event listener ***
   log(`${logPrefix} Preparing to attach paste listener via ace_callWithAce.`);
   ed.ace_callWithAce((ace) => {
@@ -1058,6 +1063,11 @@ exports.aceInitialized = (h, ctx) => {
     }
     const editor = ace.editor;
     log(`${callWithAceLogPrefix} ace.editor obtained successfully.`);
+
+    // Store editor reference for later use in table operations
+    log(`${logPrefix} Storing editor reference on editorInfo.`);
+    ed.ep_tables5_editor = editor;
+    log(`${logPrefix}: Stored editor reference as ed.ep_tables5_editor.`);
 
     // Attempt to find the inner iframe body, similar to ep_image_insert
     let $inner;
@@ -1469,12 +1479,409 @@ exports.aceInitialized = (h, ctx) => {
     log(`${funcName}: END - Refactored Phase 4`);
   };
 
-  ed.ace_doDatatableOptions = () => {
-    log('ace_doDatatableOptions: CALLED (Not Implemented)');
-    // TODO: Implement row/column add/delete operations
-    // These will involve manipulating the `tbljson` attribute on affected lines
-    // and potentially inserting/deleting lines using ace_performDocumentReplaceRange
+  ed.ace_doDatatableOptions = (action) => {
+    const funcName = 'ace_doDatatableOptions';
+    log(`${funcName}: START - Processing action: ${action}`);
+    
+    // Get the last clicked cell info to determine which table to operate on
+    const editor = ed.ep_tables5_editor;
+    if (!editor) {
+      console.error(`[ep_tables5] ${funcName}: Could not get editor reference.`);
+      return;
+    }
+    
+    const lastClick = editor.ep_tables5_last_clicked;
+    if (!lastClick || !lastClick.tblId) {
+      log(`${funcName}: No table selected. Please click on a table cell first.`);
+      console.warn('[ep_tables5] No table selected. Please click on a table cell first.');
+      return;
+    }
+    
+    log(`${funcName}: Operating on table ${lastClick.tblId}, clicked line ${lastClick.lineNum}, cell ${lastClick.cellIndex}`);
+    
+    try {
+      // Get current representation and document manager
+      const currentRep = ed.ace_getRep();
+      if (!currentRep || !currentRep.lines) {
+        console.error(`[ep_tables5] ${funcName}: Could not get current representation.`);
+        return;
+      }
+      
+      // Use the stored documentAttributeManager reference
+      const docManager = ed.ep_tables5_docManager;
+      if (!docManager) {
+        console.error(`[ep_tables5] ${funcName}: Could not get document attribute manager from stored reference.`);
+        return;
+      }
+      
+      log(`${funcName}: Successfully obtained documentAttributeManager from stored reference.`);
+      
+      // Find all lines that belong to this table
+      const tableLines = [];
+      const totalLines = currentRep.lines.length();
+      
+      for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+        try {
+          // Use the same robust approach as acePostWriteDomLineHTML to find nested tables
+          let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
+          
+          // If no attribute found directly, check if there's a table in the DOM even though attribute is missing
+          if (!lineAttrString) {
+            const lineEntry = currentRep.lines.atIndex(lineIndex);
+            if (lineEntry && lineEntry.lineNode) {
+              const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+              if (tableInDOM) {
+                const domTblId = tableInDOM.getAttribute('data-tblId');
+                const domRow = tableInDOM.getAttribute('data-row');
+                if (domTblId && domRow !== null) {
+                  const domCells = tableInDOM.querySelectorAll('td');
+                  if (domCells.length > 0) {
+                    // Reconstruct metadata from DOM
+                    const reconstructedMetadata = {
+                      tblId: domTblId,
+                      row: parseInt(domRow, 10),
+                      cols: domCells.length
+                    };
+                    lineAttrString = JSON.stringify(reconstructedMetadata);
+                    log(`${funcName}: Reconstructed metadata from DOM for line ${lineIndex}: ${lineAttrString}`);
+                  }
+                }
+              }
+            }
+          }
+          
+          if (lineAttrString) {
+            const lineMetadata = JSON.parse(lineAttrString);
+            if (lineMetadata.tblId === lastClick.tblId) {
+              const lineEntry = currentRep.lines.atIndex(lineIndex);
+              if (lineEntry) {
+                tableLines.push({
+                  lineIndex,
+                  row: lineMetadata.row,
+                  cols: lineMetadata.cols,
+                  lineText: lineEntry.text,
+                  metadata: lineMetadata
+                });
+              }
+            }
+          }
+        } catch (e) {
+          continue;
+        }
+      }
+      
+      if (tableLines.length === 0) {
+        log(`${funcName}: No table lines found for table ${lastClick.tblId}`);
+        return;
+      }
+      
+      // Sort by row number to ensure correct order
+      tableLines.sort((a, b) => a.row - b.row);
+      log(`${funcName}: Found ${tableLines.length} table lines`);
+      
+      // Determine table dimensions and target indices with robust matching
+      const numRows = tableLines.length;
+      const numCols = tableLines[0].cols;
+      
+      // More robust way to find the target row - match by both line number AND row metadata
+      let targetRowIndex = -1;
+      
+      // First try to match by line number
+      targetRowIndex = tableLines.findIndex(line => line.lineIndex === lastClick.lineNum);
+      
+      // If that fails, try to match by finding the row that contains the clicked table
+      if (targetRowIndex === -1) {
+        log(`${funcName}: Direct line number match failed, searching by DOM structure...`);
+        const clickedLineEntry = currentRep.lines.atIndex(lastClick.lineNum);
+        if (clickedLineEntry && clickedLineEntry.lineNode) {
+          const clickedTable = clickedLineEntry.lineNode.querySelector('table.dataTable[data-tblId="' + lastClick.tblId + '"]');
+          if (clickedTable) {
+            const clickedRowAttr = clickedTable.getAttribute('data-row');
+            if (clickedRowAttr !== null) {
+              const clickedRowNum = parseInt(clickedRowAttr, 10);
+              targetRowIndex = tableLines.findIndex(line => line.row === clickedRowNum);
+              log(`${funcName}: Found target row by DOM attribute matching: row ${clickedRowNum}, index ${targetRowIndex}`);
+            }
+          }
+        }
+      }
+      
+      // If still not found, default to first row but log the issue
+      if (targetRowIndex === -1) {
+        log(`${funcName}: Warning: Could not find target row, defaulting to row 0`);
+        targetRowIndex = 0;
+      }
+      
+      const targetColIndex = lastClick.cellIndex || 0;
+      
+      log(`${funcName}: Table dimensions: ${numRows} rows x ${numCols} cols. Target: row ${targetRowIndex}, col ${targetColIndex}`);
+      
+      // Perform table operations with both text and metadata updates
+      let newNumCols = numCols;
+      let success = false;
+      
+      switch (action) {
+        case 'addTblRowA': // Insert row above
+          log(`${funcName}: Inserting row above row ${targetRowIndex}`);
+          success = addTableRowAboveWithText(tableLines, targetRowIndex, numCols, lastClick.tblId, ed, docManager);
+          break;
+          
+        case 'addTblRowB': // Insert row below
+          log(`${funcName}: Inserting row below row ${targetRowIndex}`);
+          success = addTableRowBelowWithText(tableLines, targetRowIndex, numCols, lastClick.tblId, ed, docManager);
+          break;
+          
+        case 'addTblColL': // Insert column left
+          log(`${funcName}: Inserting column left of column ${targetColIndex}`);
+          newNumCols = numCols + 1;
+          success = addTableColumnLeftWithText(tableLines, targetColIndex, ed, docManager);
+          break;
+          
+        case 'addTblColR': // Insert column right
+          log(`${funcName}: Inserting column right of column ${targetColIndex}`);
+          newNumCols = numCols + 1;
+          success = addTableColumnRightWithText(tableLines, targetColIndex, ed, docManager);
+          break;
+          
+        case 'delTblRow': // Delete row
+          log(`${funcName}: Deleting row ${targetRowIndex}`);
+          success = deleteTableRowWithText(tableLines, targetRowIndex, ed, docManager);
+          break;
+          
+        case 'delTblCol': // Delete column
+          log(`${funcName}: Deleting column ${targetColIndex}`);
+          newNumCols = numCols - 1;
+          success = deleteTableColumnWithText(tableLines, targetColIndex, ed, docManager);
+          break;
+          
+        default:
+          log(`${funcName}: Unknown action: ${action}`);
+          return;
+      }
+      
+      if (!success) {
+        console.error(`[ep_tables5] ${funcName}: Table operation failed for action: ${action}`);
+        return;
+      }
+      
+      log(`${funcName}: Table operation completed successfully with text and metadata synchronization`);
+      
+    } catch (error) {
+      console.error(`[ep_tables5] ${funcName}: Error during table operation:`, error);
+      log(`${funcName}: Error details:`, { message: error.message, stack: error.stack });
+    }
+  };
+
+  // Helper functions for table operations with text updates
+  function addTableRowAboveWithText(tableLines, targetRowIndex, numCols, tblId, editorInfo, docManager) {
+    try {
+      const targetLine = tableLines[targetRowIndex];
+      const newLineText = Array.from({ length: numCols }).fill(' ').join(DELIMITER);
+      const insertLineIndex = targetLine.lineIndex;
+      
+      // Insert new line in text
+      editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
+      
+      // Update metadata for all subsequent rows
+      for (let i = targetRowIndex; i < tableLines.length; i++) {
+        const lineToUpdate = tableLines[i].lineIndex + 1; // +1 because we inserted a line
+        const newRowIndex = tableLines[i].metadata.row + 1;
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        
+        applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      // Apply metadata to the new row
+      const newMetadata = { tblId, row: targetLine.metadata.row, cols: numCols };
+      applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error adding row above with text:', e);
+      return false;
+    }
   }
+  
+  function addTableRowBelowWithText(tableLines, targetRowIndex, numCols, tblId, editorInfo, docManager) {
+    try {
+      const targetLine = tableLines[targetRowIndex];
+      const newLineText = Array.from({ length: numCols }).fill(' ').join(DELIMITER);
+      const insertLineIndex = targetLine.lineIndex + 1;
+      
+      // Insert new line in text
+      editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
+      
+      // Update metadata for all subsequent rows
+      for (let i = targetRowIndex + 1; i < tableLines.length; i++) {
+        const lineToUpdate = tableLines[i].lineIndex + 1; // +1 because we inserted a line
+        const newRowIndex = tableLines[i].metadata.row + 1;
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        
+        applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      // Apply metadata to the new row
+      const newMetadata = { tblId, row: targetLine.metadata.row + 1, cols: numCols };
+      applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row + 1, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error adding row below with text:', e);
+      return false;
+    }
+  }
+  
+  function addTableColumnLeftWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    try {
+      // Update text content for all table lines using precise character insertion
+      for (const tableLine of tableLines) {
+        const lineText = tableLine.lineText;
+        const cells = lineText.split(DELIMITER);
+        
+        // Calculate the exact insertion position
+        let insertPos = 0;
+        for (let i = 0; i < targetColIndex; i++) {
+          insertPos += (cells[i]?.length ?? 0) + DELIMITER.length;
+        }
+        
+        // Insert empty cell with delimiter at the calculated position
+        const textToInsert = (targetColIndex === 0) ? ' ' + DELIMITER : DELIMITER + ' ';
+        const insertStart = [tableLine.lineIndex, insertPos];
+        const insertEnd = [tableLine.lineIndex, insertPos];
+        
+        editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
+        
+        // Update metadata
+        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1 };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error adding column left with text:', e);
+      return false;
+    }
+  }
+  
+  function addTableColumnRightWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    try {
+      // Update text content for all table lines using precise character insertion
+      for (const tableLine of tableLines) {
+        const lineText = tableLine.lineText;
+        const cells = lineText.split(DELIMITER);
+        
+        // Calculate the exact insertion position (after the target column)
+        let insertPos = 0;
+        for (let i = 0; i <= targetColIndex; i++) {
+          insertPos += (cells[i]?.length ?? 0);
+          if (i < cells.length - 1) insertPos += DELIMITER.length;
+        }
+        
+        // Insert delimiter and empty cell at the calculated position
+        const textToInsert = DELIMITER + ' ';
+        const insertStart = [tableLine.lineIndex, insertPos];
+        const insertEnd = [tableLine.lineIndex, insertPos];
+        
+        editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
+        
+        // Update metadata
+        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1 };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error adding column right with text:', e);
+      return false;
+    }
+  }
+  
+  function deleteTableRowWithText(tableLines, targetRowIndex, editorInfo, docManager) {
+    try {
+      const targetLine = tableLines[targetRowIndex];
+      
+      // Delete the entire line
+      const deleteStart = [targetLine.lineIndex, 0];
+      const deleteEnd = [targetLine.lineIndex + 1, 0];
+      editorInfo.ace_performDocumentReplaceRange(deleteStart, deleteEnd, '');
+      
+      // Update metadata for all subsequent rows
+      for (let i = targetRowIndex + 1; i < tableLines.length; i++) {
+        const lineToUpdate = tableLines[i].lineIndex - 1; // -1 because we deleted a line
+        const newRowIndex = tableLines[i].metadata.row - 1;
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        
+        applyTableLineMetadataAttribute(lineToUpdate, tableLines[i].metadata.tblId, newRowIndex, tableLines[i].cols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error deleting row with text:', e);
+      return false;
+    }
+  }
+  
+  function deleteTableColumnWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    try {
+      // Update text content for all table lines using precise character deletion
+      for (const tableLine of tableLines) {
+        const lineText = tableLine.lineText;
+        const cells = lineText.split(DELIMITER);
+        
+        if (targetColIndex >= cells.length) {
+          log(`[ep_tables5] Warning: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
+          continue;
+        }
+        
+        // Calculate the exact character range to delete
+        let deleteStart = 0;
+        let deleteEnd = 0;
+        
+        // Calculate start position
+        for (let i = 0; i < targetColIndex; i++) {
+          deleteStart += (cells[i]?.length ?? 0) + DELIMITER.length;
+        }
+        
+        // Calculate end position
+        deleteEnd = deleteStart + (cells[targetColIndex]?.length ?? 0);
+        
+        // Include the delimiter in deletion
+        if (targetColIndex === 0 && cells.length > 1) {
+          // If deleting first column, include the delimiter after it
+          deleteEnd += DELIMITER.length;
+        } else if (targetColIndex > 0) {
+          // If deleting any other column, include the delimiter before it
+          deleteStart -= DELIMITER.length;
+        }
+        
+        log(`[ep_tables5] Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd} from "${lineText}"`);
+        
+        // Perform the precise deletion
+        const rangeStart = [tableLine.lineIndex, deleteStart];
+        const rangeEnd = [tableLine.lineIndex, deleteEnd];
+        
+        editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, '');
+        
+        // Update metadata
+        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols - 1 };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols - 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      editorInfo.ace_fastIncorp(10);
+      return true;
+    } catch (e) {
+      console.error('[ep_tables5] Error deleting column with text:', e);
+      return false;
+    }
+  }
+  
+  // ... existing code ...
+
   log('aceInitialized: END - helpers defined.');
 };
 
