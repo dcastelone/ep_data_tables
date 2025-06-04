@@ -25,16 +25,31 @@ const buildExportHtml = (metadata, richHtmlCellArray) => {
     // Or, one might choose to pad with empty cells if segments are fewer.
   }
 
+  // Get column widths from metadata, or use equal distribution if not set
+  const numCols = richHtmlCellArray.length;
+  const columnWidths = metadata.columnWidths || Array(numCols).fill(100 / numCols);
+  
+  // Ensure we have the right number of column widths
+  while (columnWidths.length < numCols) {
+    columnWidths.push(100 / numCols);
+  }
+  if (columnWidths.length > numCols) {
+    columnWidths.splice(numCols);
+  }
+
   const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000;`;
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
 
   // Each item in richHtmlCellArray is now the complete inner HTML for a cell.
+  // Apply column widths to each cell
   const cellsHtml = richHtmlCellArray.map((cellHtml, index) => {
-    return `<td style="${tdStyle}">${cellHtml || '&nbsp;'}</td>`;
+    const widthPercent = columnWidths[index] || (100 / numCols);
+    const cellStyle = `${tdStyle} width: ${widthPercent}%;`;
+    return `<td style="${cellStyle}">${cellHtml || '&nbsp;'}</td>`;
   }).join('');
 
   const tableHtml = 
-    `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse:collapse;">` +
+    `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse:collapse; table-layout: fixed;">` +
     `<tbody><tr>${cellsHtml}</tr></tbody>` +
     `</table>`;
   

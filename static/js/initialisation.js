@@ -181,6 +181,19 @@ exports.postAceInit = (hook, ctx) => {
             $inner.on('mousedown', 'table.dataTable td', function(evt) {
                 log('[ep_tables5 mousedown] RAW MOUSE DOWN detected inside table.dataTable td.');
                 
+                // Check if the click is on an image or image-related element
+                const target = evt.target;
+                const $target = $(target);
+                const isImageElement = $target.closest('.inline-image, .image-placeholder, .image-inner, .image-resize-handle').length > 0;
+                
+                if (isImageElement) {
+                    log('[ep_tables5 mousedown] Click detected on image element within table cell. Completely skipping table processing to avoid interference.');
+                    // Completely skip all table processing when image is clicked
+                    return;
+                }
+                
+                log('[ep_tables5 mousedown] Click detected on table cell (not image). Processing normally.');
+                
                 if (evt.button !== 0) return; // Only left clicks
 
                 const tdElement = $(this); 

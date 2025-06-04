@@ -46,137 +46,179 @@ const dec = s => {
 // NEW: Module-level state for last clicked cell
 let lastClickedCellInfo = null; // { lineNum: number, cellIndex: number, tblId: string }
 
+// NEW: Module-level state for column resizing (similar to images plugin)
+let isResizing = false;
+let resizeStartX = 0;
+let resizeCurrentX = 0; // Track current mouse position
+let resizeTargetTable = null;
+let resizeTargetColumn = -1;
+let resizeOriginalWidths = [];
+let resizeTableMetadata = null;
+let resizeLineNum = -1;
+let resizeOverlay = null; // Visual overlay element
+
 // ────────────────────── collectContentPre (DOM → atext) ─────────────────────
 exports.collectContentPre = (hook, ctx) => {
   const funcName = 'collectContentPre';
-  const node = ctx.dom;
-  // !!!!! VERY IMPORTANT DIAGNOSTIC LOG !!!!!
-  console.log(`[ep_tables5:client_hooks] ${funcName}: ENTERING HOOK. Node Tag: ${node?.tagName}, Node Class: ${node?.className}, Node Type: ${node?.nodeType}`);
-  if (node && typeof node.getAttribute === 'function') {
-    console.log(`[ep_tables5:client_hooks] ${funcName}: Node outerHTML (first 250 chars): ${(node.outerHTML || '').substring(0,250)}`);
-  }
+  const node = ctx.domNode; // Etherpad's collector uses ctx.domNode
+  const state = ctx.state;
+  const cc = ctx.cc; // ContentCollector instance
 
-  // Log entry point
-  log(`${funcName}: START - Processing node ID: ${node?.id}, Class: ${node?.className}, Tag: ${node?.tagName}`);
-  if (node?.tagName === 'DIV') {
-    log(`${funcName} (${node?.id}): Server-side DIV check. OuterHTML: ${node.outerHTML ? node.outerHTML.substring(0, 200) + (node.outerHTML.length > 200 ? '...':'') : '[No outerHTML]'}`);
-    // Check if this DIV contains our target SPAN (Now P)
-    const childP = node.querySelector('p[class*="tbljson-"]');
-    if (childP) {
-        log(`${funcName} (${node?.id}): DIV contains a tbljson- P. Will process P directly if it comes up.`);
-    }
-  } else if (node?.tagName === 'P') {
-     log(`${funcName} (${node?.id}): Server-side P check. Class: ${node?.className}. OuterHTML: ${node.outerHTML ? node.outerHTML.substring(0, 200) + (node.outerHTML.length > 200 ? '...':'') : '[No outerHTML]'}`);
-  }
+  log(`${funcName}: *** ENTRY POINT *** Hook: ${hook}, Node: ${node?.tagName}.${node?.className}`);
 
-  // !!!!! DIAGNOSTIC LOG BEFORE P CHECK !!!!!
-  // Removed the P check diagnostic log as the P-specific block is being removed.
+  // ***** START Primary Path: Reconstruct from rendered table *****
+  if (node?.classList?.contains('ace-line')) {
+    const tableNode = node.querySelector('table.dataTable[data-tblId]');
+    if (tableNode) {
+      log(`${funcName}: Found ace-line with rendered table. Attempting reconstruction from DOM.`);
+      
+      const docManager = cc.documentAttributeManager;
+      const rep = cc.rep;
+      const lineNum = rep?.lines?.indexOfKey(node.id);
 
-  // --- Check if it's a line DIV that WE rendered as a table --- 
-  // We need to reliably identify lines managed by this plugin.
-  // Checking for the presence of table.dataTable seems reasonable.
-  if (!(node?.classList?.contains('ace-line'))) {
-    log(`${funcName} (${node?.id}): Not an ace-line div. Allowing default.`);
-    return; // Let default handlers process children like spans
-  }
-  const tableNode = node.querySelector('table.dataTable[data-tblId]'); // Be specific
-  if (!tableNode) {
-    log(`${funcName} (${node?.id}): No table.dataTable[data-tblId] found within. Allowing default.`);
-    return; // Not a table line rendered by us, allow default collection
-  }
-  // --- Found a table line --- 
-  log(`${funcName} (${node?.id}): Found rendered table.dataTable. Proceeding with custom collection.`);
+      if (typeof lineNum === 'number' && lineNum >= 0 && docManager) {
+        log(`${funcName}: Processing line ${lineNum} (NodeID: ${node.id}) for DOM reconstruction.`);
+        try {
+          const existingAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+          log(`${funcName}: Line ${lineNum} existing ${ATTR_TABLE_JSON} attribute: '${existingAttrString}'`);
 
-  // --- 1. Retrieve Existing Metadata Attribute --- 
-  let existingMetadata = null;
-  const rep = ctx?.rep; // Ensure rep is defined in this scope if not already
-  const docAttrManager = ctx?.documentAttributeManager; // Ensure docAttrManager is defined
+          if (existingAttrString) {
+            const existingMetadata = JSON.parse(existingAttrString);
+            if (existingMetadata && typeof existingMetadata.tblId !== 'undefined' &&
+                typeof existingMetadata.row !== 'undefined' && typeof existingMetadata.cols === 'number') {
+              log(`${funcName}: Line ${lineNum} existing metadata is valid:`, existingMetadata);
 
-  const lineNum = rep?.lines?.indexOfKey(node.id); // Get line number
-  log(`${funcName} (${node?.id}): Determined line number: ${lineNum}`);
+              const trNode = tableNode.querySelector('tbody > tr');
+              if (trNode) {
+                log(`${funcName}: Line ${lineNum} found <tr> node for cell content extraction.`);
+                let cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
+                  let segmentHTML = td.innerHTML || '';
+                  log(`${funcName}: Line ${lineNum} TD[${index}] raw innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
+                  
+                  const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
+                  segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
 
-  if (typeof lineNum !== 'number' || lineNum < 0 || !docAttrManager) {
-    console.error(`[ep_tables5] ${funcName} (${node?.id}): Could not get valid line number (${lineNum}) or docAttrManager. Aborting table collection for this line.`);
-    log(`${funcName} (${node?.id}): Aborting custom collection due to missing lineNum/docAttrManager. Current node outerHTML:`, node.outerHTML?.substring(0, 500));
-    return; // Allow default handlers if we can't get line info or manager
-  }
+                  if (index > 0) {
+                    const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|(<\/span>)?<\/span>/i;
+                    segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
+                  }
+                  log(`${funcName}: Line ${lineNum} TD[${index}] cleaned innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
+                  return segmentHTML;
+                });
+                
+                if (cellHTMLSegments.length !== existingMetadata.cols) {
+                    log(`${funcName}: WARNING Line ${lineNum}: Reconstructed cell count (${cellHTMLSegments.length}) does not match metadata cols (${existingMetadata.cols}). Padding/truncating.`);
+                    while (cellHTMLSegments.length < existingMetadata.cols) cellHTMLSegments.push('&nbsp;');
+                    if (cellHTMLSegments.length > existingMetadata.cols) cellHTMLSegments.length = existingMetadata.cols;
+                }
 
-         try { 
-    const existingAttrString = docAttrManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
-    log(`${funcName} (${node?.id}): For line ${lineNum}, retrieved existing ATTR_TABLE_JSON string:`, existingAttrString);
-    if (existingAttrString) {
-      existingMetadata = JSON.parse(existingAttrString);
-      log(`${funcName} (${node?.id}): Parsed existing metadata for line ${lineNum}:`, existingMetadata);
-      // Basic validation of retrieved metadata
-      if (!existingMetadata || typeof existingMetadata.tblId === 'undefined' || typeof existingMetadata.row === 'undefined' || typeof existingMetadata.cols !== 'number') {
-        log(`${funcName} (${node?.id}): Warning - Existing metadata is invalid/incomplete. Proceeding cautiously.`);
-        console.warn(`[ep_tables5] ${funcName} (${node?.id}): Invalid metadata retrieved from line ${lineNum}.`, existingMetadata);
-        existingMetadata = null; // Discard invalid metadata
+                const canonicalLineText = cellHTMLSegments.join(DELIMITER);
+                state.line = canonicalLineText;
+                log(`${funcName}: Line ${lineNum} successfully reconstructed ctx.state.line: "${canonicalLineText.substring(0, 200)}..."`);
+
+                state.lineAttributes = state.lineAttributes || [];
+                state.lineAttributes = state.lineAttributes.filter(attr => attr[0] !== ATTR_TABLE_JSON);
+                state.lineAttributes.push([ATTR_TABLE_JSON, existingAttrString]);
+                log(`${funcName}: Line ${lineNum} ensured ${ATTR_TABLE_JSON} attribute is in state.lineAttributes.`);
+                
+                log(`${funcName}: Line ${lineNum} reconstruction complete. Returning undefined to prevent default DOM collection.`);
+                return undefined;
+              } else {
+                log(`${funcName}: ERROR Line ${lineNum}: Could not find tbody > tr in rendered table for reconstruction.`);
+              }
+            } else {
+              log(`${funcName}: ERROR Line ${lineNum}: Invalid or incomplete existing metadata from line attribute:`, existingMetadata);
+            }
+          } else {
+            log(`${funcName}: WARNING Line ${lineNum}: No existing ${ATTR_TABLE_JSON} attribute found for reconstruction, despite table DOM presence. Table may be malformed or attribute lost.`);
+            const domTblId = tableNode.getAttribute('data-tblId');
+            const domRow = tableNode.getAttribute('data-row');
+            const trNode = tableNode.querySelector('tbody > tr');
+            if (domTblId && domRow !== null && trNode && trNode.children.length > 0) {
+                log(`${funcName}: Line ${lineNum} FALLBACK: Attempting reconstruction using table DOM attributes as ${ATTR_TABLE_JSON} was missing.`);
+                const domCols = trNode.children.length;
+                const tempMetadata = {tblId: domTblId, row: parseInt(domRow, 10), cols: domCols};
+                const tempAttrString = JSON.stringify(tempMetadata);
+                log(`${funcName}: Line ${lineNum} FALLBACK: Constructed temporary metadata: ${tempAttrString}`);
+                
+                let cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
+                  let segmentHTML = td.innerHTML || '';
+                  const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
+                  segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
+                  if (index > 0) {
+                    const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|(<\/span>)?<\/span>/i;
+                    segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
+                  }
+                  return segmentHTML;
+                });
+                
+                if (cellHTMLSegments.length !== domCols) {
+                     log(`${funcName}: WARNING Line ${lineNum} (Fallback): Reconstructed cell count (${cellHTMLSegments.length}) does not match DOM cols (${domCols}).`);
+                     while(cellHTMLSegments.length < domCols) cellHTMLSegments.push('&nbsp;');
+                     if(cellHTMLSegments.length > domCols) cellHTMLSegments.length = domCols;
+                }
+
+                const canonicalLineText = cellHTMLSegments.join(DELIMITER);
+                state.line = canonicalLineText;
+                state.lineAttributes = state.lineAttributes || [];
+                state.lineAttributes = state.lineAttributes.filter(attr => attr[0] !== ATTR_TABLE_JSON);
+                state.lineAttributes.push([ATTR_TABLE_JSON, tempAttrString]);
+                log(`${funcName}: Line ${lineNum} FALLBACK: Successfully reconstructed line using DOM attributes. Returning undefined.`);
+                return undefined;
+            } else {
+                 log(`${funcName}: Line ${lineNum} FALLBACK: Could not reconstruct from DOM attributes due to missing info.`);
+            }
+          }
+        } catch (e) {
+          console.error(`[ep_tables5] ${funcName}: Line ${lineNum} error during DOM reconstruction:`, e);
+          log(`${funcName}: Line ${lineNum} Exception details:`, { message: e.message, stack: e.stack });
+        }
+      } else {
+        log(`${funcName}: Could not get valid line number (${lineNum}), rep, or docManager for DOM reconstruction of ace-line.`);
       }
     } else {
-      log(`${funcName} (${node?.id}): No existing ${ATTR_TABLE_JSON} attribute found on line ${lineNum}.`);
-      // This shouldn't happen if acePostWriteDomLineHTML ran correctly, but handle defensively.
-      return; // Allow default collection if metadata is missing
+      log(`${funcName}: Node is ace-line but no rendered table.dataTable[data-tblId] found. Allowing normal processing for: ${node?.className}`);
+    }
+  } else {
+    log(`${funcName}: Node is not an ace-line (or node is null). Node: ${node?.tagName}.${node?.className}. Allowing normal processing.`);
+  }
+  // ***** END Primary Path *****
+
+
+  // ***** Secondary Path: Apply attributes from tbljson-* class on spans (for initial creation/pasting) *****
+  const classes = ctx.cls ? ctx.cls.split(' ') : [];
+  let appliedAttribFromClass = false;
+  if (classes.length > 0) {
+    log(`${funcName}: Secondary path - Checking classes on node ${node?.tagName}.${node?.className}: [${classes.join(', ')}]`);
+  for (const cls of classes) {
+    if (cls.startsWith('tbljson-')) {
+        log(`${funcName}: Secondary path - Found tbljson class: ${cls} on node ${node?.tagName}.${node?.className}`);
+        const encodedMetadata = cls.substring(8);
+      try {
+        const decodedMetadata = dec(encodedMetadata);
+        if (decodedMetadata) {
+            cc.doAttrib(state, `${ATTR_TABLE_JSON}::${decodedMetadata}`);
+            appliedAttribFromClass = true;
+            log(`${funcName}: Secondary path - Applied attribute to OP via cc.doAttrib for class ${cls.substring(0, 20)}... on ${node?.tagName}`);
+          } else {
+            log(`${funcName}: Secondary path - ERROR - Decoded metadata is null or empty for class ${cls}`);
     }
   } catch (e) {
-    console.error(`[ep_tables5] ${funcName} (${node?.id}): Error parsing existing tbljson attribute for line ${lineNum}.`, e);
-    log(`${funcName} (${node?.id}): Error details:`, { message: e.message, stack: e.stack });
-    // Allow default collection on error
-    return;
-  }
-  if (!existingMetadata) {
-      // Should not happen if we passed checks above, but safety first.
-      log(`${funcName} (${node?.id}): Failed to secure valid existing metadata. Allowing default collection.`);
-      return;
-  }
-  // --- End Metadata Retrieval --- 
-
-  // --- 2. Construct Canonical Line Text from Rendered TD innerHTML --- 
-    const trNode = tableNode.querySelector('tbody > tr');
-    if (!trNode) {
-    log(`${funcName} (${node?.id}): ERROR - Could not find <tr> in rendered table. Cannot construct canonical text.`);
-    console.error(`[ep_tables5] ${funcName} (${node?.id}): Could not find <tr> in rendered table.`);
-    // Allow default collection as we can't determine the correct text
-    return;
+          console.error(`[ep_tables5] ${funcName}: Secondary path - Error processing tbljson class ${cls} on ${node?.tagName}:`, e);
+      }
+        break; 
+      }
     }
-
-  // Extract innerHTML from each TD in the rendered row
-  const cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
-    // Assuming buildTableFromDelimitedHTML placed content directly in TD
-    let segmentHTML = td.innerHTML || ''; // Get raw HTML content
-    let cleanContent = segmentHTML;
-
-    // For cells after the first, remove the hidden delimiter span wrapper before joining
-    if (index > 0) {
-       // Regex to match the specific span structure at the beginning
-       const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|<\/span>/;
-       cleanContent = segmentHTML.replace(hiddenDelimRegex, '');
+    if (!appliedAttribFromClass && classes.some(c => c.startsWith('tbljson-'))) {
+        log(`${funcName}: Secondary path - Found tbljson- class but failed to apply attribute.`);
+    } else if (!classes.some(c => c.startsWith('tbljson-'))) {
+        log(`${funcName}: Secondary path - No tbljson- class found on this node.`);
     }
-
-    log(`${funcName} (${node?.id}): Reading rendered TD #${index} innerHTML:`, segmentHTML);
-    log(`${funcName} (${node?.id}): Cleaned segment content for cell ${index}:`, cleanContent);
-    return cleanContent;
-  });
-  log(`${funcName} (${node?.id}): Extracted HTML segments from TDs:`, cellHTMLSegments);
-
-  // Join segments with the delimiter to form the canonical line text
-  const canonicalLineText = cellHTMLSegments.join(DELIMITER);
-  ctx.state.line = canonicalLineText;
-  log(`${funcName} (${node?.id}): Set ctx.state.line to delimited HTML: "${canonicalLineText}"`);
-  // --- End Canonical Text Construction --- 
-
-  // --- 3. Preserve Existing Metadata Attribute --- 
-  // Push the *retrieved* metadata string back onto the attributes for this line.
-  // This ensures it persists without modification by this hook.
-  const attributeString = JSON.stringify(existingMetadata);
-    ctx.lineAttributes.push([ATTR_TABLE_JSON, attributeString]);
-  log(`${funcName} (${node?.id}): Pushed existing metadata attribute back onto lineAttributes.`);
-  // --- End Attribute Preservation --- 
-
-    // Prevent default processing for the line div's children (the table)
-  // This stops Etherpad from trying to re-collect text from the rendered table.
-  log(`${funcName} (${node?.id}): END - Preventing default collection for line children.`);
-    return undefined; 
+  } else {
+     log(`${funcName}: Secondary path - Node ${node?.tagName}.${node?.className} has no ctx.cls or classes array is empty.`);
+  }
+  
+  log(`${funcName}: *** EXIT POINT *** For Node: ${node?.tagName}.${node?.className}. Applied from class: ${appliedAttribFromClass}`);
 };
 
 // ───────────── attribute → span‑class mapping (linestylefilter hook) ─────────
@@ -230,7 +272,7 @@ function escapeHtml(text = '') {
   return strText.replace(/[&<>"'']/g, function(m) { return map[m]; });
 }
 
-// NEW Helper function to build table HTML from pre-rendered delimited content
+// NEW Helper function to build table HTML from pre-rendered delimited content with resize handles
 function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   const funcName = 'buildTableFromDelimitedHTML';
   log(`${funcName}: START`, { metadata, innerHTMLSegments });
@@ -241,20 +283,39 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     return '<table class="dataTable dataTable-error"><tbody><tr><td>Error: Missing table metadata</td></tr></tbody></table>'; // Return error table
   }
 
-  // Basic styling - can be moved to CSS later
-  const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000;`; // Changed border style
+  // Get column widths from metadata, or use equal distribution if not set
+  const numCols = innerHTMLSegments.length;
+  const columnWidths = metadata.columnWidths || Array(numCols).fill(100 / numCols);
+  
+  // Ensure we have the right number of column widths
+  while (columnWidths.length < numCols) {
+    columnWidths.push(100 / numCols);
+  }
+  if (columnWidths.length > numCols) {
+    columnWidths.splice(numCols);
+  }
 
-  // Map the HTML segments directly into TD elements
-  // We trust that innerHTMLSegments contains valid, pre-rendered HTML snippets
+  // Basic styling - can be moved to CSS later
+  const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000; position: relative;`; // Added position: relative
+
+  // Map the HTML segments directly into TD elements with column widths
   const cellsHtml = innerHTMLSegments.map((segment, index) => {
     const hidden = index === 0 ? '' :
       /* keep the char in the DOM but make it visually disappear */
       `<span class="ep-tables5-delim">${HIDDEN_DELIM}</span>`;
     const cellContent = segment || '&nbsp;'; // Use non-breaking space for empty segments
     log(`${funcName}: Processing segment ${index}. Content:`, segment); // Log segment content
-    // Wrap the raw segment HTML in a span for consistency? Or directly in TD? Let's try TD directly first.
-    // Maybe add back table-cell-content span later if needed for styling/selection.
-    const tdContent = `<td style="${tdStyle}">${hidden}${cellContent}</td>`;
+    
+    // Calculate width percentage for this column
+    const widthPercent = columnWidths[index] || (100 / numCols);
+    const cellStyle = `${tdStyle} width: ${widthPercent}%;`;
+    
+    // Add resize handle to all rows (not just first row), except the last column
+    const isLastColumn = index === innerHTMLSegments.length - 1;
+    const resizeHandle = !isLastColumn ? 
+      `<div class="ep-tables5-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
+    
+    const tdContent = `<td style="${cellStyle}" data-column="${index}">${hidden}${cellContent}${resizeHandle}</td>`;
     log(`${funcName}: Generated TD HTML for segment ${index}:`, tdContent);
     return tdContent;
   }).join('');
@@ -266,7 +327,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
 
   // Construct the final table HTML
   // Rely on CSS for border-collapse, width etc. Add data attributes from metadata.
-  const tableHtml = `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse;"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
+  const tableHtml = `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
   log(`${funcName}: Generated final table HTML:`, tableHtml);
   log(`${funcName}: END - Success`);
   return tableHtml;
@@ -287,51 +348,124 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       console.error(`[ep_tables5] ${funcName}: Received invalid node or node without ID.`);
       return cb();
   }
-  // log(`${logPrefix} NodeID#${nodeId}: Initial node outerHTML:`, node.outerHTML); // Too verbose usually
-  // log(`${logPrefix} NodeID#${nodeId}: Full args object received:`, args); // Too verbose usually
-  // ***********************
+
+  // *** ENHANCED DEBUG: Log complete DOM state ***
+  log(`${logPrefix} NodeID#${nodeId}: COMPLETE DOM STRUCTURE DEBUG:`);
+  log(`${logPrefix} NodeID#${nodeId}: Node tagName: ${node.tagName}`);
+  log(`${logPrefix} NodeID#${nodeId}: Node className: ${node.className}`);
+  log(`${logPrefix} NodeID#${nodeId}: Node innerHTML length: ${node.innerHTML?.length || 0}`);
+  log(`${logPrefix} NodeID#${nodeId}: Node innerHTML (first 500 chars): "${(node.innerHTML || '').substring(0, 500)}"`);
+  log(`${logPrefix} NodeID#${nodeId}: Node children count: ${node.children?.length || 0}`);
+  
+  // Log all child elements and their classes
+  if (node.children) {
+    for (let i = 0; i < Math.min(node.children.length, 10); i++) {
+      const child = node.children[i];
+      log(`${logPrefix} NodeID#${nodeId}: Child[${i}] tagName: ${child.tagName}, className: "${child.className}", innerHTML length: ${child.innerHTML?.length || 0}`);
+      if (child.className && child.className.includes('tbljson-')) {
+        log(`${logPrefix} NodeID#${nodeId}: *** FOUND TBLJSON CLASS ON CHILD[${i}] ***`);
+      }
+    }
+  }
 
   let rowMetadata = null;
   let encodedJsonString = null;
 
-  // --- Log node classes BEFORE searching --- 
-  // log(`${logPrefix} NodeID#${nodeId}: Checking classes BEFORE search. Node classList:`, node.classList);
-  // ... (child class logging removed for brevity) ...
-  // --- End logging node classes ---
-
   // --- 1. Find and Parse Metadata Attribute --- 
   log(`${logPrefix} NodeID#${nodeId}: Searching for tbljson-* class...`);
   
-  // Helper function to recursively search for tbljson class in all descendants
-  function findTbljsonClass(element) {
+  // ENHANCED Helper function to recursively search for tbljson class in all descendants
+  function findTbljsonClass(element, depth = 0, path = '') {
+    const indent = '  '.repeat(depth);
+    log(`${logPrefix} NodeID#${nodeId}: ${indent}Searching element: ${element.tagName || 'unknown'}, path: ${path}`);
+    
     // Check the element itself
     if (element.classList) {
+      log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has ${element.classList.length} classes: [${Array.from(element.classList).join(', ')}]`);
       for (const cls of element.classList) {
           if (cls.startsWith('tbljson-')) {
+          log(`${logPrefix} NodeID#${nodeId}: ${indent}*** FOUND TBLJSON CLASS: ${cls.substring(8)} at depth ${depth}, path: ${path} ***`);
           return cls.substring(8);
         }
       }
+    } else {
+      log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has no classList`);
     }
+    
     // Recursively check all descendants
     if (element.children) {
-      for (const child of element.children) {
-        const found = findTbljsonClass(child);
-        if (found) return found;
+      log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has ${element.children.length} children`);
+      for (let i = 0; i < element.children.length; i++) {
+        const child = element.children[i];
+        const childPath = `${path}>${child.tagName}[${i}]`;
+        const found = findTbljsonClass(child, depth + 1, childPath);
+        if (found) {
+          log(`${logPrefix} NodeID#${nodeId}: ${indent}Returning found result from child: ${found}`);
+          return found;
       }
     }
+    } else {
+      log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has no children`);
+    }
+    
+    log(`${logPrefix} NodeID#${nodeId}: ${indent}No tbljson class found in this element or its children`);
     return null;
   }
 
   // Search for tbljson class starting from the node
-  encodedJsonString = findTbljsonClass(node);
+  log(`${logPrefix} NodeID#${nodeId}: Starting recursive search for tbljson class...`);
+  encodedJsonString = findTbljsonClass(node, 0, 'ROOT');
   
   if (encodedJsonString) {
-    log(`${logPrefix} NodeID#${nodeId}: Found encoded tbljson class: ${encodedJsonString}`);
+    log(`${logPrefix} NodeID#${nodeId}: *** SUCCESS: Found encoded tbljson class: ${encodedJsonString} ***`);
+  } else {
+    log(`${logPrefix} NodeID#${nodeId}: *** NO TBLJSON CLASS FOUND ***`);
   } 
 
   // If no attribute found, it's not a table line managed by us
   if (!encodedJsonString) {
       log(`${logPrefix} NodeID#${nodeId}: No tbljson-* class found. Assuming not a table line. END.`);
+      
+      // DEBUG: Add detailed logging to understand why tbljson class is missing
+      log(`${logPrefix} NodeID#${nodeId}: DEBUG - Node tag: ${node.tagName}, Node classes:`, Array.from(node.classList || []));
+      log(`${logPrefix} NodeID#${nodeId}: DEBUG - Node innerHTML (first 200 chars): "${(node.innerHTML || '').substring(0, 200)}"`);
+      
+      // Check if there are any child elements with classes
+      if (node.children && node.children.length > 0) {
+        for (let i = 0; i < Math.min(node.children.length, 5); i++) {
+          const child = node.children[i];
+          log(`${logPrefix} NodeID#${nodeId}: DEBUG - Child ${i} tag: ${child.tagName}, classes:`, Array.from(child.classList || []));
+        }
+      }
+      
+      // Check if there's already a table in this node (orphaned table)
+      const existingTable = node.querySelector('table.dataTable[data-tblId]');
+      if (existingTable) {
+        const existingTblId = existingTable.getAttribute('data-tblId');
+        const existingRow = existingTable.getAttribute('data-row');
+        log(`${logPrefix} NodeID#${nodeId}: DEBUG - Found orphaned table! TblId: ${existingTblId}, Row: ${existingRow}`);
+        
+        // This suggests the table exists but the tbljson class was lost
+        // Check if we're in a post-resize situation
+        if (existingTblId && existingRow !== null) {
+          log(`${logPrefix} NodeID#${nodeId}: POTENTIAL ISSUE - Table exists but no tbljson class. This may be a post-resize issue.`);
+          
+          // Try to look up what the metadata should be based on the table attributes
+          const tableCells = existingTable.querySelectorAll('td');
+          log(`${logPrefix} NodeID#${nodeId}: Table has ${tableCells.length} cells`);
+          
+          // Log the current line's attribute state if we can get line number
+          if (lineNum !== undefined && args?.documentAttributeManager) {
+            try {
+              const currentLineAttr = args.documentAttributeManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+              log(`${logPrefix} NodeID#${nodeId}: Current line ${lineNum} tbljson attribute: ${currentLineAttr || 'NULL'}`);
+            } catch (e) {
+              log(`${logPrefix} NodeID#${nodeId}: Error getting line attribute:`, e);
+            }
+          }
+        }
+      }
+      
       return cb(); 
   }
 
@@ -348,7 +482,6 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       // } catch(e) { /* ignore validation error */ }
       return cb(); // Do nothing further
   }
-  // *** END NEW CHECK ***
 
   log(`${logPrefix} NodeID#${nodeId}: Decoding and parsing metadata...`);
   try { 
@@ -383,25 +516,110 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // After an edit, aceKeyEvent updates atext, and node.innerHTML reflects that new "EditedCell1|Cell2" string.
   // When styling is applied, it will include spans like: <span class="author-xxx bold">Cell1</span>|<span class="author-yyy italic">Cell2</span>
   const delimitedTextFromLine = node.innerHTML;
-  log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text to preserve styling. Value: "${(delimitedTextFromLine || '').substring(0,100)}..."`);
+  log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text to preserve styling.`);
+  log(`${logPrefix} NodeID#${nodeId}: Raw innerHTML length: ${delimitedTextFromLine?.length || 0}`);
+  log(`${logPrefix} NodeID#${nodeId}: Raw innerHTML (first 1000 chars): "${(delimitedTextFromLine || '').substring(0, 1000)}"`);
+  
+  // *** ENHANCED DEBUG: Analyze delimiter presence ***
+  const delimiterCount = (delimitedTextFromLine || '').split(DELIMITER).length - 1;
+  log(`${logPrefix} NodeID#${nodeId}: Delimiter '${DELIMITER}' count in innerHTML: ${delimiterCount}`);
+  log(`${logPrefix} NodeID#${nodeId}: Expected delimiters for ${rowMetadata.cols} columns: ${rowMetadata.cols - 1}`);
+  
+  // Log all delimiter positions
+  let pos = -1;
+  const delimiterPositions = [];
+  while ((pos = delimitedTextFromLine.indexOf(DELIMITER, pos + 1)) !== -1) {
+    delimiterPositions.push(pos);
+    log(`${logPrefix} NodeID#${nodeId}: Delimiter found at position ${pos}, context: "${delimitedTextFromLine.substring(Math.max(0, pos - 20), pos + 21)}"`);
+  }
+  log(`${logPrefix} NodeID#${nodeId}: All delimiter positions: [${delimiterPositions.join(', ')}]`);
   
   // The DELIMITER const is defined at the top of this file.
   const htmlSegments = (delimitedTextFromLine || '').split(DELIMITER); 
+  
+  log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT ANALYSIS ***`);
+  log(`${logPrefix} NodeID#${nodeId}: Split resulted in ${htmlSegments.length} segments`);
+  for (let i = 0; i < htmlSegments.length; i++) {
+    const segment = htmlSegments[i] || '';
+    log(`${logPrefix} NodeID#${nodeId}: Segment[${i}] length: ${segment.length}`);
+    log(`${logPrefix} NodeID#${nodeId}: Segment[${i}] content (first 200 chars): "${segment.substring(0, 200)}"`);
+    if (segment.length > 200) {
+      log(`${logPrefix} NodeID#${nodeId}: Segment[${i}] content (chars 200-400): "${segment.substring(200, 400)}"`);
+    }
+    if (segment.length > 400) {
+      log(`${logPrefix} NodeID#${nodeId}: Segment[${i}] content (chars 400-600): "${segment.substring(400, 600)}"`);
+    }
+    // Check if segment contains image-related content
+    if (segment.includes('image:') || segment.includes('image-placeholder') || segment.includes('currently-selected')) {
+      log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT[${i}] CONTAINS IMAGE CONTENT ***`);
+    }
+  }
 
   log(`${logPrefix} NodeID#${nodeId}: Parsed HTML segments (${htmlSegments.length}):`, htmlSegments.map(s => (s || '').substring(0,50) + (s && s.length > 50 ? '...' : '')));
 
-  // --- Validation --- 
+  // --- Enhanced Validation with Automatic Structure Reconstruction --- 
+  let finalHtmlSegments = htmlSegments;
+  
   if (htmlSegments.length !== rowMetadata.cols) {
-      log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Table structure might be incorrect.`);
+      log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED ***`);
+      log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Auto-reconstructing table structure.`);
       console.warn(`[ep_tables5] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
+      
+      // *** ENHANCED DEBUG: Analyze why we have a mismatch ***
+      log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH ANALYSIS ***`);
+      log(`${logPrefix} NodeID#${nodeId}: Expected columns: ${rowMetadata.cols}`);
+      log(`${logPrefix} NodeID#${nodeId}: Actual segments: ${htmlSegments.length}`);
+      log(`${logPrefix} NodeID#${nodeId}: Delimiter count found: ${delimiterCount}`);
+      log(`${logPrefix} NodeID#${nodeId}: Expected delimiter count: ${rowMetadata.cols - 1}`);
+      
+      // Check if this is an image selection issue
+      const hasImageSelected = delimitedTextFromLine.includes('currently-selected');
+      const hasImageContent = delimitedTextFromLine.includes('image:');
+      log(`${logPrefix} NodeID#${nodeId}: Has selected image: ${hasImageSelected}`);
+      log(`${logPrefix} NodeID#${nodeId}: Has image content: ${hasImageContent}`);
+      
+      if (hasImageSelected) {
+        log(`${logPrefix} NodeID#${nodeId}: *** POTENTIAL CAUSE: Image selection state may be affecting segment parsing ***`);
+      }
+      
+      // ENHANCED: Always reconstruct the correct structure based on metadata
+      const reconstructedSegments = [];
+      
+      if (htmlSegments.length === 1 && rowMetadata.cols > 1) {
+          // Single segment case - put all content in first column, empty remaining columns
+          log(`${logPrefix} NodeID#${nodeId}: Single segment detected, distributing content to first column of ${rowMetadata.cols} columns.`);
+          reconstructedSegments.push(htmlSegments[0]);
+          for (let i = 1; i < rowMetadata.cols; i++) {
+              reconstructedSegments.push('&nbsp;');
+          }
+      } else if (htmlSegments.length > rowMetadata.cols) {
+          // Too many segments - merge excess into last column
+          log(`${logPrefix} NodeID#${nodeId}: Too many segments (${htmlSegments.length}), merging excess into ${rowMetadata.cols} columns.`);
+          for (let i = 0; i < rowMetadata.cols - 1; i++) {
+              reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
+          }
+          // Merge remaining segments into last column
+          const remainingSegments = htmlSegments.slice(rowMetadata.cols - 1);
+          reconstructedSegments.push(remainingSegments.join('|') || '&nbsp;');
   } else {
-      log(`${logPrefix} NodeID#${nodeId}: Parsed segment count matches metadata cols (${rowMetadata.cols}).`);
+          // Too few segments - pad with empty columns
+          log(`${logPrefix} NodeID#${nodeId}: Too few segments (${htmlSegments.length}), padding to ${rowMetadata.cols} columns.`);
+          for (let i = 0; i < rowMetadata.cols; i++) {
+              reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
+          }
+      }
+      
+      log(`${logPrefix} NodeID#${nodeId}: Reconstructed ${reconstructedSegments.length} segments to match expected ${rowMetadata.cols} columns.`);
+      finalHtmlSegments = reconstructedSegments;
+      
+  } else {
+      log(`${logPrefix} NodeID#${nodeId}: Segment count matches metadata cols (${rowMetadata.cols}). Using original segments.`);
   }
 
   // --- 3. Build and Render Table ---
   log(`${logPrefix} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
       try {
-      const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, htmlSegments);
+      const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, finalHtmlSegments);
       log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing content.`);
       
       // Find the element that contains the tbljson class to determine if we need to preserve block wrappers
@@ -644,6 +862,37 @@ exports.aceKeyEvent = (h, ctx) => {
           lineAttrString = docManager.getAttributeOnLine(reportedLineNum, ATTR_TABLE_JSON);
           if (lineAttrString) tableMetadata = JSON.parse(lineAttrString);
           if (!tableMetadata || typeof tableMetadata.cols !== 'number') tableMetadata = null;
+          
+          // If no attribute found directly, check if there's a table in the DOM even though attribute is missing (block styles)
+          if (!lineAttrString) {
+            try {
+              const rep = editorInfo.ace_getRep();
+              const lineEntry = rep.lines.atIndex(reportedLineNum);
+              if (lineEntry && lineEntry.lineNode) {
+                const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+                if (tableInDOM) {
+                  const domTblId = tableInDOM.getAttribute('data-tblId');
+                  const domRow = tableInDOM.getAttribute('data-row');
+                  log(`${logPrefix} Fallback: Found table in DOM without attribute! TblId=${domTblId}, Row=${domRow}`);
+                  // Try to reconstruct the metadata from DOM
+                  const domCells = tableInDOM.querySelectorAll('td');
+                  if (domTblId && domRow !== null && domCells.length > 0) {
+                    log(`${logPrefix} Fallback: Attempting to reconstruct metadata from DOM...`);
+                    const reconstructedMetadata = {
+                      tblId: domTblId,
+                      row: parseInt(domRow, 10),
+                      cols: domCells.length
+                    };
+                    lineAttrString = JSON.stringify(reconstructedMetadata);
+                    tableMetadata = reconstructedMetadata;
+                    log(`${logPrefix} Fallback: Reconstructed metadata: ${lineAttrString}`);
+                  }
+                }
+              }
+            } catch(e) {
+              log(`${logPrefix} Fallback: Error checking DOM for table:`, e);
+            }
+          }
       } catch(e) { tableMetadata = null; } // Ignore errors here, handled below
 
       if (!tableMetadata) {
@@ -949,10 +1198,19 @@ exports.aceKeyEvent = (h, ctx) => {
 
         // *** CRITICAL: Re-apply the line attribute after ANY modification ***
         log(`${logPrefix} -> Re-applying tbljson line attribute...`);
+        
+        // DEBUG: Log the values before calculating attrStringToApply
+        log(`${logPrefix} DEBUG: Before calculating attrStringToApply - trustedLastClick=${trustedLastClick}, reportedLineNum=${reportedLineNum}, currentLineNum=${currentLineNum}`);
+        log(`${logPrefix} DEBUG: lineAttrString value:`, lineAttrString ? `"${lineAttrString}"` : 'null/undefined');
+        
         const applyHelper = editorInfo.ep_tables5_applyMeta; 
         if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) { 
              // Pass the original lineAttrString if available AND if it belongs to the currentLineNum
              const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
+             
+             log(`${logPrefix} DEBUG: Calculated attrStringToApply:`, attrStringToApply ? `"${attrStringToApply}"` : 'null/undefined');
+             log(`${logPrefix} DEBUG: Condition result: (${trustedLastClick} || ${reportedLineNum} === ${currentLineNum}) = ${trustedLastClick || reportedLineNum === currentLineNum}`);
+             
              applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply, docManager);
              log(`${logPrefix} -> tbljson line attribute re-applied (using rep before edit).`);
                 } else {
@@ -1050,15 +1308,15 @@ exports.aceInitialized = (h, ctx) => {
   ed.ep_tables5_docManager = docManager;
   log(`${logPrefix}: Stored documentAttributeManager reference as ed.ep_tables5_docManager.`);
 
-  // *** ADDED: Paste event listener ***
-  log(`${logPrefix} Preparing to attach paste listener via ace_callWithAce.`);
+  // *** ENHANCED: Paste event listener + Column resize listeners ***
+  log(`${logPrefix} Preparing to attach paste and resize listeners via ace_callWithAce.`);
   ed.ace_callWithAce((ace) => {
-    const callWithAceLogPrefix = '[ep_tables5:aceInitialized:callWithAceForPaste]';
-    log(`${callWithAceLogPrefix} Entered ace_callWithAce callback for paste listener.`);
+    const callWithAceLogPrefix = '[ep_tables5:aceInitialized:callWithAceForListeners]';
+    log(`${callWithAceLogPrefix} Entered ace_callWithAce callback for listeners.`);
 
     if (!ace || !ace.editor) {
-      console.error(`${callWithAceLogPrefix} ERROR: ace or ace.editor is not available. Cannot attach paste listener.`);
-      log(`${callWithAceLogPrefix} Aborting paste listener attachment due to missing ace.editor.`);
+      console.error(`${callWithAceLogPrefix} ERROR: ace or ace.editor is not available. Cannot attach listeners.`);
+      log(`${callWithAceLogPrefix} Aborting listener attachment due to missing ace.editor.`);
       return;
     }
     const editor = ace.editor;
@@ -1072,7 +1330,7 @@ exports.aceInitialized = (h, ctx) => {
     // Attempt to find the inner iframe body, similar to ep_image_insert
     let $inner;
     try {
-      log(`${callWithAceLogPrefix} Attempting to find inner iframe body for paste listener attachment.`);
+      log(`${callWithAceLogPrefix} Attempting to find inner iframe body for listener attachment.`);
       const $iframeOuter = $('iframe[name="ace_outer"]');
       if ($iframeOuter.length === 0) {
         console.error(`${callWithAceLogPrefix} ERROR: Could not find outer iframe (ace_outer).`);
@@ -1104,11 +1362,12 @@ exports.aceInitialized = (h, ctx) => {
     }
 
     if (!$inner || $inner.length === 0) {
-      console.error(`${callWithAceLogPrefix} ERROR: $inner is not valid after attempting to find iframe body. Cannot attach paste listener.`);
+      console.error(`${callWithAceLogPrefix} ERROR: $inner is not valid after attempting to find iframe body. Cannot attach listeners.`);
       log(`${callWithAceLogPrefix} $inner is invalid. Aborting.`);
       return;
     }
 
+    // *** EXISTING PASTE LISTENER ***
     log(`${callWithAceLogPrefix} Attaching paste event listener to $inner (inner iframe body).`);
     $inner.on('paste', (evt) => {
       const pasteLogPrefix = '[ep_tables5:pasteHandler]';
@@ -1302,103 +1561,336 @@ exports.aceInitialized = (h, ctx) => {
       }
     });
     log(`${callWithAceLogPrefix} Paste event listener attached.`);
-  }, 'tables5_paste_listener', true);
-  log(`${logPrefix} ace_callWithAce for paste listener setup completed.`);
-  // *** END ADDED: Paste event listener ***
+
+    // *** NEW: Column resize listeners ***
+    log(`${callWithAceLogPrefix} Attaching column resize listeners...`);
+    
+    // Get the iframe documents for proper event delegation
+    const $iframeOuter = $('iframe[name="ace_outer"]');
+    const $iframeInner = $iframeOuter.contents().find('iframe[name="ace_inner"]');
+    const innerDoc = $iframeInner.contents();
+    const outerDoc = $iframeOuter.contents();
+    
+    log(`${callWithAceLogPrefix} Found iframe documents: outer=${outerDoc.length}, inner=${innerDoc.length}`);
+    
+    // Mousedown on resize handles
+    $inner.on('mousedown', '.ep-tables5-resize-handle', (evt) => {
+      const resizeLogPrefix = '[ep_tables5:resizeMousedown]';
+      log(`${resizeLogPrefix} Resize handle mousedown detected`);
+      
+      // Only handle left mouse button clicks
+      if (evt.button !== 0) {
+        log(`${resizeLogPrefix} Ignoring non-left mouse button: ${evt.button}`);
+        return;
+      }
+      
+      // Check if this is related to an image element to avoid conflicts
+      const target = evt.target;
+      const $target = $(target);
+      const isImageRelated = $target.closest('.inline-image, .image-placeholder, .image-inner').length > 0;
+      const isImageResizeHandle = $target.hasClass('image-resize-handle') || $target.closest('.image-resize-handle').length > 0;
+      
+      if (isImageRelated || isImageResizeHandle) {
+        log(`${resizeLogPrefix} Click detected on image-related element or image resize handle, ignoring for table resize`);
+        return;
+      }
+      
+      evt.preventDefault();
+      evt.stopPropagation();
+      
+      const handle = evt.target;
+      const columnIndex = parseInt(handle.getAttribute('data-column'), 10);
+      const table = handle.closest('table.dataTable');
+      const lineNode = table.closest('div.ace-line');
+      
+      log(`${resizeLogPrefix} Parsed resize target: columnIndex=${columnIndex}, table=${!!table}, lineNode=${!!lineNode}`);
+      
+      if (table && lineNode && !isNaN(columnIndex)) {
+        // Get table metadata
+        const tblId = table.getAttribute('data-tblId');
+        const rep = ed.ace_getRep();
+        
+        if (!rep || !rep.lines) {
+          console.error(`${resizeLogPrefix} Cannot get editor representation`);
+          return;
+        }
+        
+        const lineNum = rep.lines.indexOfKey(lineNode.id);
+        
+        log(`${resizeLogPrefix} Table info: tblId=${tblId}, lineNum=${lineNum}`);
+        
+        if (tblId && lineNum !== -1) {
+          try {
+            const lineAttrString = docManager.getAttributeOnLine(lineNum, 'tbljson');
+            if (lineAttrString) {
+              const metadata = JSON.parse(lineAttrString);
+              if (metadata.tblId === tblId) {
+                log(`${resizeLogPrefix} Starting resize with metadata:`, metadata);
+                startColumnResize(table, columnIndex, evt.clientX, metadata, lineNum);
+                log(`${resizeLogPrefix} Started resize for column ${columnIndex}`);
+                
+                // DEBUG: Verify global state is set
+                log(`${resizeLogPrefix} Global resize state: isResizing=${isResizing}, targetTable=${!!resizeTargetTable}, targetColumn=${resizeTargetColumn}`);
+              } else {
+                log(`${resizeLogPrefix} Table ID mismatch: ${metadata.tblId} vs ${tblId}`);
+              }
+            } else {
+              log(`${resizeLogPrefix} No table metadata found for line ${lineNum}, trying DOM reconstruction...`);
+              
+              // Fallback: Reconstruct metadata from DOM (same logic as ace_doDatatableOptions)
+              const rep = ed.ace_getRep();
+              if (rep && rep.lines) {
+                const lineEntry = rep.lines.atIndex(lineNum);
+                if (lineEntry && lineEntry.lineNode) {
+                  const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+                  if (tableInDOM) {
+                    const domTblId = tableInDOM.getAttribute('data-tblId');
+                    const domRow = tableInDOM.getAttribute('data-row');
+                    if (domTblId === tblId && domRow !== null) {
+                      const domCells = tableInDOM.querySelectorAll('td');
+                      if (domCells.length > 0) {
+                        // Extract column widths from DOM cells
+                        const columnWidths = [];
+                        domCells.forEach(cell => {
+                          const style = cell.getAttribute('style') || '';
+                          const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                          if (widthMatch) {
+                            columnWidths.push(parseFloat(widthMatch[1]));
+                          } else {
+                            // Fallback to equal distribution if no width found
+                            columnWidths.push(100 / domCells.length);
+                          }
+                        });
+                        
+                        // Reconstruct metadata from DOM with preserved column widths
+                        const reconstructedMetadata = {
+                          tblId: domTblId,
+                          row: parseInt(domRow, 10),
+                          cols: domCells.length,
+                          columnWidths: columnWidths
+                        };
+                        log(`${resizeLogPrefix} Reconstructed metadata from DOM:`, reconstructedMetadata);
+                        
+                        startColumnResize(table, columnIndex, evt.clientX, reconstructedMetadata, lineNum);
+                        log(`${resizeLogPrefix} Started resize for column ${columnIndex} using reconstructed metadata`);
+                        
+                        // DEBUG: Verify global state is set
+                        log(`${resizeLogPrefix} Global resize state: isResizing=${isResizing}, targetTable=${!!resizeTargetTable}, targetColumn=${resizeTargetColumn}`);
+    } else {
+                        log(`${resizeLogPrefix} DOM table found but no cells detected`);
+                      }
+                    } else {
+                      log(`${resizeLogPrefix} DOM table found but tblId mismatch or missing row: domTblId=${domTblId}, domRow=${domRow}`);
+                    }
+                  } else {
+                    log(`${resizeLogPrefix} No table found in DOM for line ${lineNum}`);
+                  }
+                } else {
+                  log(`${resizeLogPrefix} Could not get line entry or lineNode for line ${lineNum}`);
+                }
+              } else {
+                log(`${resizeLogPrefix} Could not get rep or rep.lines for DOM reconstruction`);
+              }
+            }
+          } catch (e) {
+            console.error(`${resizeLogPrefix} Error getting table metadata:`, e);
+          }
+        } else {
+          log(`${resizeLogPrefix} Invalid line number (${lineNum}) or table ID (${tblId})`);
+        }
+      } else {
+        log(`${resizeLogPrefix} Invalid resize target:`, { table: !!table, lineNode: !!lineNode, columnIndex });
+      }
+    });
+    
+    // Enhanced mousemove and mouseup handlers - attach to multiple contexts for better coverage
+    const setupGlobalHandlers = () => {
+      const mouseupLogPrefix = '[ep_tables5:resizeMouseup]';
+      const mousemoveLogPrefix = '[ep_tables5:resizeMousemove]';
+      
+      // Mousemove handler
+      const handleMousemove = (evt) => {
+        if (isResizing) {
+          evt.preventDefault();
+          updateColumnResize(evt.clientX);
+        }
+      };
+      
+      // Mouseup handler with enhanced debugging
+      const handleMouseup = (evt) => {
+        log(`${mouseupLogPrefix} Mouseup detected on ${evt.target.tagName || 'unknown'}. isResizing: ${isResizing}`);
+        
+        if (isResizing) {
+          log(`${mouseupLogPrefix} Processing resize completion...`);
+          evt.preventDefault();
+          evt.stopPropagation();
+          
+          // Add a small delay to ensure all DOM updates are complete
+          setTimeout(() => {
+            log(`${mouseupLogPrefix} Executing finishColumnResize after delay...`);
+            finishColumnResize(ed, docManager);
+            log(`${mouseupLogPrefix} Resize completion finished.`);
+          }, 50);
+        } else {
+          log(`${mouseupLogPrefix} Not in resize mode, ignoring mouseup.`);
+        }
+      };
+      
+      // Attach to multiple contexts to ensure we catch the event
+      log(`${callWithAceLogPrefix} Attaching global mousemove/mouseup handlers to multiple contexts...`);
+      
+      // 1. Main document (outside iframes)
+      $(document).on('mousemove', handleMousemove);
+      $(document).on('mouseup', handleMouseup);
+      log(`${callWithAceLogPrefix} Attached to main document`);
+      
+      // 2. Outer iframe document  
+      if (outerDoc.length > 0) {
+        outerDoc.on('mousemove', handleMousemove);
+        outerDoc.on('mouseup', handleMouseup);
+        log(`${callWithAceLogPrefix} Attached to outer iframe document`);
+      }
+      
+      // 3. Inner iframe document
+      if (innerDoc.length > 0) {
+        innerDoc.on('mousemove', handleMousemove);
+        innerDoc.on('mouseup', handleMouseup);
+        log(`${callWithAceLogPrefix} Attached to inner iframe document`);
+      }
+      
+      // 4. Inner iframe body (the editing area)
+      $inner.on('mousemove', handleMousemove);
+      $inner.on('mouseup', handleMouseup);
+      log(`${callWithAceLogPrefix} Attached to inner iframe body`);
+      
+      // 5. Add a failsafe - listen for any mouse events during resize
+      const failsafeMouseup = (evt) => {
+        if (isResizing) {
+          log(`${mouseupLogPrefix} FAILSAFE: Detected mouse event during resize: ${evt.type}`);
+          if (evt.type === 'mouseup' || evt.type === 'mousedown' || evt.type === 'click') {
+            log(`${mouseupLogPrefix} FAILSAFE: Triggering resize completion due to ${evt.type}`);
+            setTimeout(() => {
+              if (isResizing) { // Double-check we're still resizing
+                finishColumnResize(ed, docManager);
+              }
+            }, 100);
+          }
+        }
+      };
+      
+      // Attach failsafe to main document with capture=true to catch events early
+      document.addEventListener('mouseup', failsafeMouseup, true);
+      document.addEventListener('mousedown', failsafeMouseup, true);
+      document.addEventListener('click', failsafeMouseup, true);
+      log(`${callWithAceLogPrefix} Attached failsafe event handlers`);
+    };
+    
+    // Setup the global handlers
+    setupGlobalHandlers();
+    
+    log(`${callWithAceLogPrefix} Column resize listeners attached successfully.`);
+
+  }, 'tablePasteAndResizeListeners', true);
+  log(`${logPrefix} ace_callWithAce for listeners setup completed.`);
 
   // Helper function to apply the metadata attribute to a line
   function applyTableLineMetadataAttribute (lineNum, tblId, rowIndex, numCols, rep, editorInfo, attributeString = null, documentAttributeManager = null) {
     const funcName = 'applyTableLineMetadataAttribute';
     log(`${logPrefix}:${funcName}: START - Applying METADATA attribute to line ${lineNum}`, {tblId, rowIndex, numCols});
 
-    // If attributeString is not provided, construct it. Otherwise, use the provided one.
-    if (!attributeString) {
-        log(`${logPrefix}:${funcName}: Constructing attribute string as none was provided.`);
-        const metadata = {
-            tblId: tblId,
-            row: rowIndex,
-            cols: numCols // Store column count in metadata
-        };
-        attributeString = JSON.stringify(metadata);
-    } else {
-         log(`${logPrefix}:${funcName}: Using pre-provided attribute string: ${attributeString}`); // Log the provided string
-    }
-
-    log(`${logPrefix}:${funcName}: Metadata Attribute String to apply: ${attributeString}`);
-    try {
-       // Get a FRESH rep to ensure line length is current after edits
-       const liveRep   = editorInfo.ace_getRep();
-       const lineEntry = liveRep.lines.atIndex(lineNum);
-       if (!lineEntry) {
-           log(`${logPrefix}:${funcName}: ERROR - Could not find line entry in provided rep for line number ${lineNum}. Rep lines:`, rep.lines);
-           throw new Error(`Could not find line entry for line number ${lineNum}`);
-       }
-       const lineLength = lineEntry.text.length;
-       // Ensure length is at least 1 if line is technically empty but exists
-       const effectiveLineLength = Math.max(1, lineLength); 
-       log(`${logPrefix}:${funcName}: Line ${lineNum} current text length (from live rep): ${lineLength}. Effective length for attribute: ${effectiveLineLength}. Line text: "${lineEntry.text}"`);
-
-       // Get existing attributes on the line to preserve them (especially block attributes)
-       const docManager = documentAttributeManager || editorInfo?.documentAttributeManager;
-       let existingAttributes = [];
-       
-       log(`${logPrefix}:${funcName}: DEBUG - docManager available: ${!!docManager}`);
-       log(`${logPrefix}:${funcName}: DEBUG - getAttributesOnLine method: ${typeof docManager?.getAttributesOnLine}`);
-       log(`${logPrefix}:${funcName}: DEBUG - getAttributeOnLine method: ${typeof docManager?.getAttributeOnLine}`);
-       
-       if (docManager && typeof docManager.getAttributesOnLine === 'function') {
-         try {
-           // Get all attributes currently on this line
-           const lineAttribs = docManager.getAttributesOnLine(lineNum);
-           log(`${logPrefix}:${funcName}: DEBUG - getAttributesOnLine result:`, lineAttribs);
-           if (lineAttribs && typeof lineAttribs === 'object') {
-             // Convert to the format expected by ace_performDocumentApplyAttributesToRange
-             for (const [key, value] of Object.entries(lineAttribs)) {
-               if (key !== ATTR_TABLE_JSON) { // Don't duplicate the tbljson attribute
-                 existingAttributes.push([key, value]);
-                 log(`${logPrefix}:${funcName}: Preserving existing attribute: ${key}=${value}`);
-               }
-             }
+    let finalMetadata;
+    
+    // If attributeString is provided, check if it contains columnWidths
+    if (attributeString) {
+      try {
+        const providedMetadata = JSON.parse(attributeString);
+        if (providedMetadata.columnWidths && Array.isArray(providedMetadata.columnWidths) && providedMetadata.columnWidths.length === numCols) {
+          // Already has valid columnWidths, use as-is
+          finalMetadata = providedMetadata;
+          log(`${logPrefix}:${funcName}: Using provided metadata with existing columnWidths`);
+        } else {
+          // Has metadata but missing/invalid columnWidths, extract from DOM
+          finalMetadata = providedMetadata;
+          log(`${logPrefix}:${funcName}: Provided metadata missing columnWidths, attempting DOM extraction`);
            }
          } catch (e) {
-           log(`${logPrefix}:${funcName}: Warning - Could not get existing attributes via getAttributesOnLine, proceeding with fallback:`, e);
-         }
-       } 
-       
-       if (existingAttributes.length === 0 && docManager && typeof docManager.getAttributeOnLine === 'function') {
-         // Fallback: try to get common block attributes individually
-         log(`${logPrefix}:${funcName}: DEBUG - Using fallback individual attribute retrieval`);
-         const commonBlockAttribs = ['align', 'center', 'heading', 'list', 'indent'];
-         for (const attrKey of commonBlockAttribs) {
-           try {
-             const attrValue = docManager.getAttributeOnLine(lineNum, attrKey);
-             if (attrValue) {
-               existingAttributes.push([attrKey, attrValue]);
-               log(`${logPrefix}:${funcName}: Preserving existing block attribute: ${attrKey}=${attrValue}`);
+        log(`${logPrefix}:${funcName}: Error parsing provided attributeString, will reconstruct:`, e);
+        finalMetadata = null;
+      }
+    }
+    
+    // If we don't have complete metadata or need to extract columnWidths
+    if (!finalMetadata || !finalMetadata.columnWidths) {
+      let columnWidths = null;
+      
+      // Try to extract existing column widths from DOM if available
+      try {
+        const lineEntry = rep.lines.atIndex(lineNum);
+        if (lineEntry && lineEntry.lineNode) {
+          const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+          if (tableInDOM) {
+            const domTblId = tableInDOM.getAttribute('data-tblId');
+            if (domTblId === tblId) {
+              const domCells = tableInDOM.querySelectorAll('td');
+              if (domCells.length === numCols) {
+                // Extract column widths from DOM cells
+                columnWidths = [];
+                domCells.forEach(cell => {
+                  const style = cell.getAttribute('style') || '';
+                  const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                  if (widthMatch) {
+                    columnWidths.push(parseFloat(widthMatch[1]));
+                  } else {
+                    // Fallback to equal distribution if no width found
+                    columnWidths.push(100 / numCols);
+                  }
+                });
+                log(`${logPrefix}:${funcName}: Extracted column widths from DOM: ${columnWidths.map(w => w.toFixed(1) + '%').join(', ')}`);
+              }
+            }
+          }
              }
            } catch (e) {
-             // Ignore errors for individual attributes
-             log(`${logPrefix}:${funcName}: DEBUG - Error getting individual attribute ${attrKey}:`, e);
-           }
-         }
-       } else if (!docManager) {
-         log(`${logPrefix}:${funcName}: Warning - No documentAttributeManager available, cannot preserve existing attributes.`);
+        log(`${logPrefix}:${funcName}: Error extracting column widths from DOM:`, e);
+      }
+      
+      // Build final metadata
+      finalMetadata = finalMetadata || {
+        tblId: tblId,
+        row: rowIndex,
+        cols: numCols
+      };
+      
+      // Add column widths if we found them
+      if (columnWidths && columnWidths.length === numCols) {
+        finalMetadata.columnWidths = columnWidths;
+      }
+    }
+
+    const finalAttributeString = JSON.stringify(finalMetadata);
+    log(`${logPrefix}:${funcName}: Final metadata attribute string: ${finalAttributeString}`);
+    
+    try {
+       // Get current line info
+       const lineEntry = rep.lines.atIndex(lineNum);
+       if (!lineEntry) {
+           log(`${logPrefix}:${funcName}: ERROR - Could not find line entry for line number ${lineNum}`);
+           return;
        }
+       const lineLength = Math.max(1, lineEntry.text.length);
+       log(`${logPrefix}:${funcName}: Line ${lineNum} text length: ${lineLength}`);
 
-       // Combine existing attributes with the new tbljson attribute
-       const allAttributes = [...existingAttributes, [ATTR_TABLE_JSON, attributeString]];
-       log(`${logPrefix}:${funcName}: Applying all attributes:`, allAttributes);
-
-       // Use ace_performDocumentApplyAttributesToRange
-       // *** Apply all attributes to the FULL line range ***
+       // Simple attribute application - just add the tbljson attribute
+       const attributes = [[ATTR_TABLE_JSON, finalAttributeString]];
        const start = [lineNum, 0];
-       const end = [lineNum, effectiveLineLength]; // Use potentially corrected length
-       log(`${logPrefix}:${funcName}: Applying attributes via ace_performDocumentApplyAttributesToRange to range [${start}]-[${end}]`);
-       editorInfo.ace_performDocumentApplyAttributesToRange(start, end, allAttributes);
-       log(`${logPrefix}:${funcName}: Applied all attributes to line ${lineNum} over range [${start}]-[${end}].`);
+       const end = [lineNum, lineLength];
+       
+       log(`${logPrefix}:${funcName}: Applying tbljson attribute to range [${start}]-[${end}]`);
+       editorInfo.ace_performDocumentApplyAttributesToRange(start, end, attributes);
+       log(`${logPrefix}:${funcName}: Successfully applied tbljson attribute to line ${lineNum}`);
+        
     } catch(e) {
         console.error(`[ep_tables5] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
-        log(`[ep_tables5] ${logPrefix}:${funcName}: Error details:`, { message: e.message, stack: e.stack });
     }
   }
 
@@ -1682,17 +2174,48 @@ exports.aceInitialized = (h, ctx) => {
       // Insert new line in text
       editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
       
+      // Preserve column widths from existing metadata or extract from DOM
+      let columnWidths = targetLine.metadata.columnWidths;
+      if (!columnWidths) {
+        // Extract from DOM for block-styled rows
+        try {
+          const rep = editorInfo.ace_getRep();
+          const lineEntry = rep.lines.atIndex(targetLine.lineIndex + 1); // +1 because we inserted a line
+          if (lineEntry && lineEntry.lineNode) {
+            const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tblId}"]`);
+            if (tableInDOM) {
+              const domCells = tableInDOM.querySelectorAll('td');
+              if (domCells.length === numCols) {
+                columnWidths = [];
+                domCells.forEach(cell => {
+                  const style = cell.getAttribute('style') || '';
+                  const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                  if (widthMatch) {
+                    columnWidths.push(parseFloat(widthMatch[1]));
+                  } else {
+                    columnWidths.push(100 / numCols);
+                  }
+                });
+                console.log('[ep_tables5] addTableRowAbove: Extracted column widths from DOM:', columnWidths);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[ep_tables5] addTableRowAbove: Error extracting column widths from DOM:', e);
+        }
+      }
+      
       // Update metadata for all subsequent rows
       for (let i = targetRowIndex; i < tableLines.length; i++) {
         const lineToUpdate = tableLines[i].lineIndex + 1; // +1 because we inserted a line
         const newRowIndex = tableLines[i].metadata.row + 1;
-        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex, columnWidths };
         
         applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
       // Apply metadata to the new row
-      const newMetadata = { tblId, row: targetLine.metadata.row, cols: numCols };
+      const newMetadata = { tblId, row: targetLine.metadata.row, cols: numCols, columnWidths };
       applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       
       editorInfo.ace_fastIncorp(10);
@@ -1712,17 +2235,48 @@ exports.aceInitialized = (h, ctx) => {
       // Insert new line in text
       editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
       
+      // Preserve column widths from existing metadata or extract from DOM
+      let columnWidths = targetLine.metadata.columnWidths;
+      if (!columnWidths) {
+        // Extract from DOM for block-styled rows
+        try {
+          const rep = editorInfo.ace_getRep();
+          const lineEntry = rep.lines.atIndex(targetLine.lineIndex);
+          if (lineEntry && lineEntry.lineNode) {
+            const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tblId}"]`);
+            if (tableInDOM) {
+              const domCells = tableInDOM.querySelectorAll('td');
+              if (domCells.length === numCols) {
+                columnWidths = [];
+                domCells.forEach(cell => {
+                  const style = cell.getAttribute('style') || '';
+                  const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                  if (widthMatch) {
+                    columnWidths.push(parseFloat(widthMatch[1]));
+                  } else {
+                    columnWidths.push(100 / numCols);
+                  }
+                });
+                console.log('[ep_tables5] addTableRowBelow: Extracted column widths from DOM:', columnWidths);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[ep_tables5] addTableRowBelow: Error extracting column widths from DOM:', e);
+        }
+      }
+      
       // Update metadata for all subsequent rows
       for (let i = targetRowIndex + 1; i < tableLines.length; i++) {
         const lineToUpdate = tableLines[i].lineIndex + 1; // +1 because we inserted a line
         const newRowIndex = tableLines[i].metadata.row + 1;
-        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex, columnWidths };
         
         applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
       // Apply metadata to the new row
-      const newMetadata = { tblId, row: targetLine.metadata.row + 1, cols: numCols };
+      const newMetadata = { tblId, row: targetLine.metadata.row + 1, cols: numCols, columnWidths };
       applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row + 1, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       
       editorInfo.ace_fastIncorp(10);
@@ -1753,8 +2307,52 @@ exports.aceInitialized = (h, ctx) => {
         
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
         
+        // Update column widths - add new column with equal width distribution
+        let oldColumnWidths = tableLine.metadata.columnWidths;
+        if (!oldColumnWidths) {
+          // Extract from DOM for block-styled rows
+          try {
+            const rep = editorInfo.ace_getRep();
+            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+            if (lineEntry && lineEntry.lineNode) {
+              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
+              if (tableInDOM) {
+                const domCells = tableInDOM.querySelectorAll('td');
+                if (domCells.length === tableLine.cols) {
+                  oldColumnWidths = [];
+                  domCells.forEach(cell => {
+                    const style = cell.getAttribute('style') || '';
+                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                    if (widthMatch) {
+                      oldColumnWidths.push(parseFloat(widthMatch[1]));
+                    } else {
+                      oldColumnWidths.push(100 / tableLine.cols);
+                    }
+                  });
+                  console.log('[ep_tables5] addTableColumnLeft: Extracted column widths from DOM:', oldColumnWidths);
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[ep_tables5] addTableColumnLeft: Error extracting column widths from DOM:', e);
+          }
+        }
+        
+        // Fallback to equal distribution if still not found
+        if (!oldColumnWidths) {
+          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
+        }
+        
+        const averageWidth = 100 / (tableLine.cols + 1);
+        const newColumnWidths = [...oldColumnWidths];
+        newColumnWidths.splice(targetColIndex, 0, averageWidth);
+        
+        // Normalize all widths to sum to 100%
+        const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
+        const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
+        
         // Update metadata
-        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1 };
+        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
         applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
@@ -1787,8 +2385,52 @@ exports.aceInitialized = (h, ctx) => {
         
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
         
+        // Update column widths - add new column with equal width distribution
+        let oldColumnWidths = tableLine.metadata.columnWidths;
+        if (!oldColumnWidths) {
+          // Extract from DOM for block-styled rows
+          try {
+            const rep = editorInfo.ace_getRep();
+            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+            if (lineEntry && lineEntry.lineNode) {
+              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
+              if (tableInDOM) {
+                const domCells = tableInDOM.querySelectorAll('td');
+                if (domCells.length === tableLine.cols) {
+                  oldColumnWidths = [];
+                  domCells.forEach(cell => {
+                    const style = cell.getAttribute('style') || '';
+                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                    if (widthMatch) {
+                      oldColumnWidths.push(parseFloat(widthMatch[1]));
+                    } else {
+                      oldColumnWidths.push(100 / tableLine.cols);
+                    }
+                  });
+                  console.log('[ep_tables5] addTableColumnRight: Extracted column widths from DOM:', oldColumnWidths);
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[ep_tables5] addTableColumnRight: Error extracting column widths from DOM:', e);
+          }
+        }
+        
+        // Fallback to equal distribution if still not found
+        if (!oldColumnWidths) {
+          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
+        }
+        
+        const averageWidth = 100 / (tableLine.cols + 1);
+        const newColumnWidths = [...oldColumnWidths];
+        newColumnWidths.splice(targetColIndex + 1, 0, averageWidth);
+        
+        // Normalize all widths to sum to 100%
+        const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
+        const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
+        
         // Update metadata
-        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1 };
+        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
         applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
@@ -1809,11 +2451,48 @@ exports.aceInitialized = (h, ctx) => {
       const deleteEnd = [targetLine.lineIndex + 1, 0];
       editorInfo.ace_performDocumentReplaceRange(deleteStart, deleteEnd, '');
       
+      // Extract column widths from target line before deletion for preserving in remaining rows
+      let columnWidths = targetLine.metadata.columnWidths;
+      if (!columnWidths) {
+        // Extract from DOM for block-styled rows
+        try {
+          const rep = editorInfo.ace_getRep();
+          // Check any remaining table line for column widths
+          for (const tableLine of tableLines) {
+            if (tableLine.lineIndex !== targetLine.lineIndex) {
+              const lineEntry = rep.lines.atIndex(tableLine.lineIndex >= targetLine.lineIndex ? tableLine.lineIndex - 1 : tableLine.lineIndex);
+              if (lineEntry && lineEntry.lineNode) {
+                const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${targetLine.metadata.tblId}"]`);
+                if (tableInDOM) {
+                  const domCells = tableInDOM.querySelectorAll('td');
+                  if (domCells.length === targetLine.metadata.cols) {
+                    columnWidths = [];
+                    domCells.forEach(cell => {
+                      const style = cell.getAttribute('style') || '';
+                      const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                      if (widthMatch) {
+                        columnWidths.push(parseFloat(widthMatch[1]));
+                      } else {
+                        columnWidths.push(100 / targetLine.metadata.cols);
+                      }
+                    });
+                    console.log('[ep_tables5] deleteTableRow: Extracted column widths from DOM:', columnWidths);
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[ep_tables5] deleteTableRow: Error extracting column widths from DOM:', e);
+        }
+      }
+      
       // Update metadata for all subsequent rows
       for (let i = targetRowIndex + 1; i < tableLines.length; i++) {
         const lineToUpdate = tableLines[i].lineIndex - 1; // -1 because we deleted a line
         const newRowIndex = tableLines[i].metadata.row - 1;
-        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex };
+        const newMetadata = { ...tableLines[i].metadata, row: newRowIndex, columnWidths };
         
         applyTableLineMetadataAttribute(lineToUpdate, tableLines[i].metadata.tblId, newRowIndex, tableLines[i].cols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
@@ -1867,9 +2546,54 @@ exports.aceInitialized = (h, ctx) => {
         
         editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, '');
         
+        // Update column widths - remove the target column and redistribute
+        let oldColumnWidths = tableLine.metadata.columnWidths;
+        if (!oldColumnWidths) {
+          // Extract from DOM for block-styled rows
+          try {
+            const rep = editorInfo.ace_getRep();
+            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+            if (lineEntry && lineEntry.lineNode) {
+              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
+              if (tableInDOM) {
+                const domCells = tableInDOM.querySelectorAll('td');
+                if (domCells.length === tableLine.cols) {
+                  oldColumnWidths = [];
+                  domCells.forEach(cell => {
+                    const style = cell.getAttribute('style') || '';
+                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                    if (widthMatch) {
+                      oldColumnWidths.push(parseFloat(widthMatch[1]));
+                    } else {
+                      oldColumnWidths.push(100 / tableLine.cols);
+                    }
+                  });
+                  console.log('[ep_tables5] deleteTableColumn: Extracted column widths from DOM:', oldColumnWidths);
+                }
+              }
+            }
+          } catch (e) {
+            console.error('[ep_tables5] deleteTableColumn: Error extracting column widths from DOM:', e);
+          }
+        }
+        
+        // Fallback to equal distribution if still not found
+        if (!oldColumnWidths) {
+          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
+        }
+        
+        const newColumnWidths = [...oldColumnWidths];
+        newColumnWidths.splice(targetColIndex, 1);
+        
+        // Normalize remaining widths to sum to 100%
+        if (newColumnWidths.length > 0) {
+          const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
+          const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
+        
         // Update metadata
-        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols - 1 };
+          const newMetadata = { ...tableLine.metadata, cols: tableLine.cols - 1, columnWidths: normalizedWidths };
         applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols - 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+        }
       }
       
       editorInfo.ace_fastIncorp(10);
@@ -1989,99 +2713,411 @@ exports.aceEditorCSS                = () => {
 // Register TABLE as a block element, hoping it influences rendering behavior
 exports.aceRegisterBlockElements = () => ['table'];
 
-// *** ADDED: postAceInit hook for attaching listeners ***
-exports.postAceInit = (hookName, ctx) => {
-  const func = '[ep_tables5:postAceInit]';
-  log(`${func} START`);
-  const editorInfo = ctx.ace; // Get editorInfo from context
+// NEW: Column resize helper functions (adapted from images plugin)
+const startColumnResize = (table, columnIndex, startX, metadata, lineNum) => {
+  const funcName = 'startColumnResize';
+  log(`${funcName}: Starting resize for column ${columnIndex}`);
+  
+  isResizing = true;
+  resizeStartX = startX;
+  resizeCurrentX = startX; // Initialize current position
+  resizeTargetTable = table;
+  resizeTargetColumn = columnIndex;
+  resizeTableMetadata = metadata;
+  resizeLineNum = lineNum;
+  
+  // Get current column widths
+  const numCols = metadata.cols;
+  resizeOriginalWidths = metadata.columnWidths ? [...metadata.columnWidths] : Array(numCols).fill(100 / numCols);
+  
+  log(`${funcName}: Original widths:`, resizeOriginalWidths);
+  
+  // Create visual overlay instead of modifying table directly
+  createResizeOverlay(table, columnIndex);
+  
+  // Prevent text selection during resize
+  document.body.style.userSelect = 'none';
+  document.body.style.webkitUserSelect = 'none';
+  document.body.style.mozUserSelect = 'none';
+  document.body.style.msUserSelect = 'none';
+};
 
-  if (!editorInfo) {
-    console.error(`${func} ERROR: editorInfo (ctx.ace) is not available.`);
+const createResizeOverlay = (table, columnIndex) => {
+  // Create a visual overlay that shows resize feedback using the same positioning logic as image plugin
+  if (resizeOverlay) {
+    resizeOverlay.remove();
+  }
+  
+  // Get all the necessary container references like image plugin
+  const $innerIframe = $('iframe[name="ace_outer"]').contents().find('iframe[name="ace_inner"]');
+  if ($innerIframe.length === 0) {
+    console.error('[ep_tables5] createResizeOverlay: Could not find inner iframe');
     return;
   }
 
-  // Setup mousedown listener via callWithAce
-  editorInfo.ace_callWithAce((ace) => {
-      const editor = ace.editor;
-      const inner = ace.editor.container; // Use the main container
-
-      if (!editor || !inner) {
-          console.error(`${func} ERROR: ace.editor or ace.editor.container not found within ace_callWithAce.`);
+  const innerDocBody = $innerIframe.contents().find('body')[0];
+  const padOuter = $('iframe[name="ace_outer"]').contents().find('body');
+  
+  if (!innerDocBody || padOuter.length === 0) {
+    console.error('[ep_tables5] createResizeOverlay: Could not find required container elements');
           return;
       }
 
-      log(`${func} Inside callWithAce for attaching mousedown listeners.`);
+  // Find all tables that belong to the same table (same tblId)
+  const tblId = table.getAttribute('data-tblId');
+  if (!tblId) {
+    console.error('[ep_tables5] createResizeOverlay: No tblId found on table');
+    return;
+  }
+  
+  const allTableRows = innerDocBody.querySelectorAll(`table.dataTable[data-tblId="${tblId}"]`);
+  if (allTableRows.length === 0) {
+    console.error('[ep_tables5] createResizeOverlay: No table rows found for tblId:', tblId);
+    return;
+  }
+  
+  // Calculate the bounding box that encompasses all table rows
+  let minTop = Infinity;
+  let maxBottom = -Infinity;
+  let tableLeft = 0;
+  let tableWidth = 0;
+  
+  Array.from(allTableRows).forEach((tableRow, index) => {
+    const rect = tableRow.getBoundingClientRect();
+    minTop = Math.min(minTop, rect.top);
+    maxBottom = Math.max(maxBottom, rect.bottom);
+    
+    // Use the first table row for horizontal positioning
+    if (index === 0) {
+      tableLeft = rect.left;
+      tableWidth = rect.width;
+    }
+  });
+  
+  const totalTableHeight = maxBottom - minTop;
+  
+  log(`createResizeOverlay: Found ${allTableRows.length} table rows, total height: ${totalTableHeight}px`);
+  
+  // Calculate positioning using the same method as image plugin
+  let innerBodyRect, innerIframeRect, outerBodyRect;
+  let scrollTopInner, scrollLeftInner, scrollTopOuter, scrollLeftOuter;
+  
+  try {
+    innerBodyRect = innerDocBody.getBoundingClientRect();
+    innerIframeRect = $innerIframe[0].getBoundingClientRect();
+    outerBodyRect = padOuter[0].getBoundingClientRect();
+    scrollTopInner = innerDocBody.scrollTop;
+    scrollLeftInner = innerDocBody.scrollLeft;
+    scrollTopOuter = padOuter.scrollTop();
+    scrollLeftOuter = padOuter.scrollLeft();
+  } catch (e) {
+    console.error('[ep_tables5] createResizeOverlay: Error getting container rects/scrolls:', e);
+    return;
+  }
+  
+  // Get table position relative to inner body using the full table bounds
+  const tableTopRelInner = minTop - innerBodyRect.top + scrollTopInner;
+  const tableLeftRelInner = tableLeft - innerBodyRect.left + scrollLeftInner;
+  
+  // Calculate position in outer body coordinates (like image plugin)
+  const innerFrameTopRelOuter = innerIframeRect.top - outerBodyRect.top + scrollTopOuter;
+  const innerFrameLeftRelOuter = innerIframeRect.left - outerBodyRect.left + scrollLeftOuter;
+  
+  const overlayTopOuter = innerFrameTopRelOuter + tableTopRelInner;
+  const overlayLeftOuter = innerFrameLeftRelOuter + tableLeftRelInner;
+  
+  // Apply padding and manual offsets like image plugin
+  const outerPadding = window.getComputedStyle(padOuter[0]);
+  const outerPaddingTop = parseFloat(outerPadding.paddingTop) || 0;
+  const outerPaddingLeft = parseFloat(outerPadding.paddingLeft) || 0;
+  
+  // Use the same manual offsets as image plugin
+  const MANUAL_OFFSET_TOP = 6;
+  const MANUAL_OFFSET_LEFT = 39;
+  
+  const finalOverlayTop = overlayTopOuter + outerPaddingTop + MANUAL_OFFSET_TOP;
+  const finalOverlayLeft = overlayLeftOuter + outerPaddingLeft + MANUAL_OFFSET_LEFT;
+  
+  // Calculate the position for the blue line at the right edge of the target column
+  const tds = table.querySelectorAll('td');
+  const tds_array = Array.from(tds);
+  let linePosition = 0;
+  
+  if (columnIndex < tds_array.length) {
+    const currentTd = tds_array[columnIndex];
+    const currentTdRect = currentTd.getBoundingClientRect();
+    const currentRelativeLeft = currentTdRect.left - tableLeft; // Use tableLeft instead of tableRect.left
+    const currentWidth = currentTdRect.width;
+    linePosition = currentRelativeLeft + currentWidth;
+  }
+  
+  // Create overlay container (invisible background) that spans the entire table height
+  resizeOverlay = document.createElement('div');
+  resizeOverlay.className = 'ep-tables5-resize-overlay';
+  resizeOverlay.style.cssText = `
+    position: absolute;
+    left: ${finalOverlayLeft}px;
+    top: ${finalOverlayTop}px;
+    width: ${tableWidth}px;
+    height: ${totalTableHeight}px;
+    pointer-events: none;
+    z-index: 1000;
+    background: transparent;
+    box-sizing: border-box;
+  `;
+  
+  // Create the blue vertical line (Google Docs style) spanning the full table height
+  const resizeLine = document.createElement('div');
+  resizeLine.className = 'resize-line';
+  resizeLine.style.cssText = `
+    position: absolute;
+    left: ${linePosition}px;
+    top: 0;
+    width: 2px;
+    height: 100%;
+    background: #1a73e8;
+    z-index: 1001;
+  `;
+  resizeOverlay.appendChild(resizeLine);
+  
+  // Append to outer body like image plugin does with its outline
+  padOuter.append(resizeOverlay);
+  
+  log('createResizeOverlay: Created Google Docs style blue line overlay spanning entire table height');
+};
 
-      // Initialize shared state on the editor object
-      if (!editor.ep_tables5_last_clicked) {
-          editor.ep_tables5_last_clicked = null;
-          log(`${func} Initialized ace.editor.ep_tables5_last_clicked`);
+const updateColumnResize = (currentX) => {
+  if (!isResizing || !resizeTargetTable || !resizeOverlay) return;
+  
+  resizeCurrentX = currentX; // Store current position for finishColumnResize
+  const deltaX = currentX - resizeStartX;
+  
+  // Get the table width from the first row for percentage calculation
+  const tblId = resizeTargetTable.getAttribute('data-tblId');
+  if (!tblId) return;
+  
+  // Find the first table row to get consistent width measurements
+  const $innerIframe = $('iframe[name="ace_outer"]').contents().find('iframe[name="ace_inner"]');
+  const innerDocBody = $innerIframe.contents().find('body')[0];
+  const firstTableRow = innerDocBody.querySelector(`table.dataTable[data-tblId="${tblId}"]`);
+  
+  if (!firstTableRow) return;
+  
+  const tableRect = firstTableRow.getBoundingClientRect();
+  const deltaPercent = (deltaX / tableRect.width) * 100;
+  
+  // Calculate new widths for final application
+  const newWidths = [...resizeOriginalWidths];
+  const currentColumn = resizeTargetColumn;
+  const nextColumn = currentColumn + 1;
+  
+  if (nextColumn < newWidths.length) {
+    const transfer = Math.min(deltaPercent, newWidths[nextColumn] - 5);
+    const actualTransfer = Math.max(transfer, -(newWidths[currentColumn] - 5));
+    
+    newWidths[currentColumn] += actualTransfer;
+    newWidths[nextColumn] -= actualTransfer;
+    
+    // Update the blue line position to show the new column boundary
+    const resizeLine = resizeOverlay.querySelector('.resize-line');
+    if (resizeLine) {
+      // Calculate new position based on the updated column width
+      const newColumnWidth = (newWidths[currentColumn] / 100) * tableRect.width;
+      
+      // Find the original left position relative to the first table row
+      const tds = firstTableRow.querySelectorAll('td');
+      const tds_array = Array.from(tds);
+      
+      if (currentColumn < tds_array.length) {
+        const currentTd = tds_array[currentColumn];
+        const currentTdRect = currentTd.getBoundingClientRect();
+        const currentRelativeLeft = currentTdRect.left - tableRect.left;
+        
+        // New line position is the original left position plus the new width
+        const newLinePosition = currentRelativeLeft + newColumnWidth;
+        resizeLine.style.left = newLinePosition + 'px';
       }
+    }
+  }
+};
 
-      log(`${func} Attempting to attach mousedown listener to editor container for cell selection...`);
-
-      inner.addEventListener('mousedown', (evt) => {
-          const target = evt.target;
-          const mousedownFuncName = '[ep_tables5 mousedown]';
-          log(`${mousedownFuncName} RAW MOUSE DOWN detected. Target:`, target);
-
-          // Check if the click is inside a TD of our table
-          const clickedTD = target.closest('td');
-          const clickedTR = target.closest('tr');
-          const clickedTable = target.closest('table.dataTable');
-
-          // Clear previous selection state regardless of where click happened
-          if (editor.ep_tables5_last_clicked) {
-              log(`${mousedownFuncName} Clearing previous selection info.`);
-              // TODO: Add visual class removal if needed
-          }
-          editor.ep_tables5_last_clicked = null; // Clear state first
-
-          if (clickedTD && clickedTR && clickedTable) {
-              log(`${mousedownFuncName} Click detected inside table.dataTable td.`);
-              try {
-                  const cellIndex = Array.from(clickedTR.children).indexOf(clickedTD);
-                  const lineNode = clickedTable.closest('div.ace-line');
-                  const tblId = clickedTable.getAttribute('data-tblId');
-
-                  // Ensure ace.rep and ace.rep.lines are available
-                  if (!ace.rep || !ace.rep.lines) {
-                      console.error(`${mousedownFuncName} ERROR: ace.rep or ace.rep.lines not available inside mousedown listener.`);
+const finishColumnResize = (editorInfo, docManager) => {
+  if (!isResizing || !resizeTargetTable) {
+    log('finishColumnResize: Not in resize mode');
                       return;
                   }
 
-                  if (lineNode && lineNode.id && tblId !== null && cellIndex !== -1) {
-                      const lineNum = ace.rep.lines.indexOfKey(lineNode.id);
-                      if (lineNum !== -1) {
-                           // Store the accurately determined cell info
-                           // Initialize relative position - might be refined later if needed
-                           const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
-                           editor.ep_tables5_last_clicked = clickInfo;
-                           log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
-
-                           // TODO: Add visual class for selection if desired
-                           log(`${mousedownFuncName} TEST: Skipped adding/removing selected-table-cell class`);
-
-                      } else {
-                          log(`${mousedownFuncName} Clicked cell (ERROR): Could not find line number for node ID: ${lineNode.id}`);
-                      }
-                  } else {
-                       log(`${mousedownFuncName} Clicked cell (ERROR): Missing required info (lineNode, lineNode.id, tblId, or valid cellIndex).`, { lineNode, tblId, cellIndex });
-                  }
-              } catch (e) {
-                  console.error(`${mousedownFuncName} Error processing table cell click:`, e);
-                  log(`${mousedownFuncName} Error details:`, { message: e.message, stack: e.stack });
-                  editor.ep_tables5_last_clicked = null; // Ensure state is clear on error
+  const funcName = 'finishColumnResize';
+  log(`${funcName}: Finishing resize`);
+  
+  // Calculate final widths from actual mouse movement
+  const tableRect = resizeTargetTable.getBoundingClientRect();
+  const deltaX = resizeCurrentX - resizeStartX;
+  const deltaPercent = (deltaX / tableRect.width) * 100;
+  
+  log(`${funcName}: Mouse moved ${deltaX}px (${deltaPercent.toFixed(1)}%)`);
+  
+  const finalWidths = [...resizeOriginalWidths];
+  const currentColumn = resizeTargetColumn;
+  const nextColumn = currentColumn + 1;
+  
+  if (nextColumn < finalWidths.length) {
+    // Transfer width between columns with minimum constraints
+    const transfer = Math.min(deltaPercent, finalWidths[nextColumn] - 5);
+    const actualTransfer = Math.max(transfer, -(finalWidths[currentColumn] - 5));
+    
+    finalWidths[currentColumn] += actualTransfer;
+    finalWidths[nextColumn] -= actualTransfer;
+    
+    log(`${funcName}: Transferred ${actualTransfer.toFixed(1)}% from column ${nextColumn} to column ${currentColumn}`);
+  }
+  
+  // Normalize widths
+  const totalWidth = finalWidths.reduce((sum, width) => sum + width, 0);
+  if (totalWidth > 0) {
+    finalWidths.forEach((width, index) => {
+      finalWidths[index] = (width / totalWidth) * 100;
+    });
+  }
+  
+  log(`${funcName}: Final normalized widths:`, finalWidths.map(w => w.toFixed(1) + '%'));
+  
+  // Clean up overlay
+  if (resizeOverlay) {
+    resizeOverlay.remove();
+    resizeOverlay = null;
+  }
+  
+  // Clean up global styles
+  document.body.style.userSelect = '';
+  document.body.style.webkitUserSelect = '';
+  document.body.style.mozUserSelect = '';
+  document.body.style.msUserSelect = '';
+  
+  // Set isResizing to false BEFORE making changes
+  isResizing = false;
+  
+  // Apply updated metadata to ALL rows in the table (not just the resized row)
+  editorInfo.ace_callWithAce((ace) => {
+    const callWithAceLogPrefix = `${funcName}[ace_callWithAce]`;
+    log(`${callWithAceLogPrefix}: Finding and updating all table rows with tblId: ${resizeTableMetadata.tblId}`);
+    
+    try {
+      const rep = ace.ace_getRep();
+      if (!rep || !rep.lines) {
+        console.error(`${callWithAceLogPrefix}: Invalid rep`);
+        return;
+      }
+      
+      // Find all lines that belong to this table
+      const tableLines = [];
+      const totalLines = rep.lines.length();
+      
+      for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+        try {
+          // Get line metadata to check if it belongs to our table
+          let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
+          
+          if (lineAttrString) {
+            const lineMetadata = JSON.parse(lineAttrString);
+            if (lineMetadata.tblId === resizeTableMetadata.tblId) {
+              tableLines.push({
+                lineIndex,
+                metadata: lineMetadata
+              });
               }
           } else {
-               log(`${mousedownFuncName} Click was outside a table.dataTable td.`);
-          }
-      });
-      log(`${func} Mousedown listeners for cell selection attached successfully (inside callWithAce).`);
-
-  }, 'tableCellSelectionPostAce', true); // Unique name for callstack
-
-  log(`${func} END`);
+            // Fallback: Check if there's a table in the DOM even though attribute is missing (block styles)
+            const lineEntry = rep.lines.atIndex(lineIndex);
+            if (lineEntry && lineEntry.lineNode) {
+              const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+              if (tableInDOM) {
+                const domTblId = tableInDOM.getAttribute('data-tblId');
+                const domRow = tableInDOM.getAttribute('data-row');
+                if (domTblId === resizeTableMetadata.tblId && domRow !== null) {
+                  const domCells = tableInDOM.querySelectorAll('td');
+                  if (domCells.length > 0) {
+                    // Extract column widths from DOM cells
+                    const columnWidths = [];
+                    domCells.forEach(cell => {
+                      const style = cell.getAttribute('style') || '';
+                      const widthMatch = style.match(/width:\s*([0-9.]+)%/);
+                      if (widthMatch) {
+                        columnWidths.push(parseFloat(widthMatch[1]));
+                      } else {
+                        // Fallback to equal distribution if no width found
+                        columnWidths.push(100 / domCells.length);
+                      }
+                    });
+                    
+                    // Reconstruct metadata from DOM with preserved column widths
+                    const reconstructedMetadata = {
+                      tblId: domTblId,
+                      row: parseInt(domRow, 10),
+                      cols: domCells.length,
+                      columnWidths: columnWidths
+                    };
+                    log(`${callWithAceLogPrefix}: Reconstructed metadata from DOM for line ${lineIndex}:`, reconstructedMetadata);
+                    tableLines.push({
+                      lineIndex,
+                      metadata: reconstructedMetadata
+                    });
+                  }
+                }
+              }
+            }
+                  }
+              } catch (e) {
+          continue; // Skip lines with invalid metadata
+        }
+      }
+      
+      log(`${callWithAceLogPrefix}: Found ${tableLines.length} table lines to update`);
+      
+      // Update all table lines with new column widths
+      for (const tableLine of tableLines) {
+        const updatedMetadata = { ...tableLine.metadata, columnWidths: finalWidths };
+        const updatedMetadataString = JSON.stringify(updatedMetadata);
+        
+        // Get the full line range for this table line
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        if (!lineEntry) {
+          console.error(`${callWithAceLogPrefix}: Could not get line entry for line ${tableLine.lineIndex}`);
+          continue;
+        }
+        
+        const lineLength = Math.max(1, lineEntry.text.length);
+        const rangeStart = [tableLine.lineIndex, 0];
+        const rangeEnd = [tableLine.lineIndex, lineLength];
+        
+        log(`${callWithAceLogPrefix}: Updating line ${tableLine.lineIndex} (row ${tableLine.metadata.row}) with new column widths`);
+        
+        // Apply the updated metadata attribute directly
+        ace.ace_performDocumentApplyAttributesToRange(rangeStart, rangeEnd, [
+          [ATTR_TABLE_JSON, updatedMetadataString]
+        ]);
+      }
+      
+      log(`${callWithAceLogPrefix}: Successfully applied updated column widths to all ${tableLines.length} table rows`);
+      
+    } catch (error) {
+      console.error(`${callWithAceLogPrefix}: Error applying updated metadata:`, error);
+      log(`${callWithAceLogPrefix}: Error details:`, { message: error.message, stack: error.stack });
+    }
+  }, 'applyTableResizeToAllRows', true);
+  
+  log(`${funcName}: Column width update initiated for all table rows via ace_callWithAce`);
+  
+  // Reset state
+  resizeStartX = 0;
+  resizeCurrentX = 0;
+  resizeTargetTable = null;
+  resizeTargetColumn = -1;
+  resizeOriginalWidths = [];
+  resizeTableMetadata = null;
+  resizeLineNum = -1;
+  
+  log(`${funcName}: Resize complete - state reset`);
 };
 
 // NEW: Undo/Redo protection
@@ -2152,6 +3188,151 @@ exports.aceUndoRedo = (hook, ctx) => {
     console.error(`${logPrefix} Error during undo/redo validation:`, e);
     log(`${logPrefix} Error details:`, { message: e.message, stack: e.stack });
   }
+};
+
+// *** ADDED: postAceInit hook for attaching listeners ***
+exports.postAceInit = (hookName, ctx) => {
+  const func = '[ep_tables5:postAceInit]';
+  log(`${func} START`);
+  const editorInfo = ctx.ace; // Get editorInfo from context
+
+  if (!editorInfo) {
+    console.error(`${func} ERROR: editorInfo (ctx.ace) is not available.`);
+    return;
+  }
+
+  // Setup mousedown listener via callWithAce
+  editorInfo.ace_callWithAce((ace) => {
+      const editor = ace.editor;
+      const inner = ace.editor.container; // Use the main container
+
+      if (!editor || !inner) {
+          console.error(`${func} ERROR: ace.editor or ace.editor.container not found within ace_callWithAce.`);
+          return;
+      }
+
+      log(`${func} Inside callWithAce for attaching mousedown listeners.`);
+
+      // Initialize shared state on the editor object
+      if (!editor.ep_tables5_last_clicked) {
+          editor.ep_tables5_last_clicked = null;
+          log(`${func} Initialized ace.editor.ep_tables5_last_clicked`);
+      }
+
+      log(`${func} Attempting to attach mousedown listener to editor container for cell selection...`);
+
+      inner.addEventListener('mousedown', (evt) => {
+          const target = evt.target;
+          const mousedownFuncName = '[ep_tables5 mousedown]';
+          log(`${mousedownFuncName} RAW MOUSE DOWN detected. Target:`, target);
+          log(`${mousedownFuncName} Target tagName: ${target.tagName}`);
+          log(`${mousedownFuncName} Target className: ${target.className}`);
+          log(`${mousedownFuncName} Target ID: ${target.id}`);
+
+          // Don't interfere with resize handle clicks
+          if (target.classList && target.classList.contains('ep-tables5-resize-handle')) {
+            log(`${mousedownFuncName} Click on resize handle, skipping cell selection logic.`);
+            return;
+          }
+
+          // *** ENHANCED DEBUG: Check for image-related elements ***
+          const $target = $(target);
+          const isImageElement = $target.closest('.inline-image, .image-placeholder, .image-inner, .image-resize-handle').length > 0;
+          log(`${mousedownFuncName} Is target or ancestor image-related?`, isImageElement);
+          
+          if (isImageElement) {
+            log(`${mousedownFuncName} *** IMAGE ELEMENT DETECTED ***`);
+            log(`${mousedownFuncName} Closest image container:`, $target.closest('.inline-image, .image-placeholder')[0]);
+            log(`${mousedownFuncName} Is .inline-image:`, $target.hasClass('inline-image') || $target.closest('.inline-image').length > 0);
+            log(`${mousedownFuncName} Is .image-placeholder:`, $target.hasClass('image-placeholder') || $target.closest('.image-placeholder').length > 0);
+            log(`${mousedownFuncName} Is .image-inner:`, $target.hasClass('image-inner') || $target.closest('.image-inner').length > 0);
+            log(`${mousedownFuncName} Is .image-resize-handle:`, $target.hasClass('image-resize-handle') || $target.closest('.image-resize-handle').length > 0);
+          }
+          
+          // Check if the click is on an image or image-related element - if so, completely skip
+          if (isImageElement) {
+            log(`${mousedownFuncName} Click detected on image element within table cell. Completely skipping table processing to avoid interference.`);
+            return;
+          }
+
+          // *** ENHANCED DEBUG: Check table context ***
+          const clickedTD = target.closest('td');
+          const clickedTR = target.closest('tr');
+          const clickedTable = target.closest('table.dataTable');
+          
+          log(`${mousedownFuncName} Table context analysis:`);
+          log(`${mousedownFuncName} - Clicked TD:`, !!clickedTD);
+          log(`${mousedownFuncName} - Clicked TR:`, !!clickedTR);
+          log(`${mousedownFuncName} - Clicked table.dataTable:`, !!clickedTable);
+          
+          if (clickedTable) {
+            log(`${mousedownFuncName} - Table tblId:`, clickedTable.getAttribute('data-tblId'));
+            log(`${mousedownFuncName} - Table row:`, clickedTable.getAttribute('data-row'));
+          }
+          if (clickedTD) {
+            log(`${mousedownFuncName} - TD data-column:`, clickedTD.getAttribute('data-column'));
+            log(`${mousedownFuncName} - TD innerHTML length:`, clickedTD.innerHTML?.length || 0);
+            log(`${mousedownFuncName} - TD contains images:`, clickedTD.querySelector('.inline-image, .image-placeholder') ? 'YES' : 'NO');
+          }
+
+          // Clear previous selection state regardless of where click happened
+          if (editor.ep_tables5_last_clicked) {
+              log(`${mousedownFuncName} Clearing previous selection info.`);
+              // TODO: Add visual class removal if needed
+          }
+          editor.ep_tables5_last_clicked = null; // Clear state first
+
+          if (clickedTD && clickedTR && clickedTable) {
+              log(`${mousedownFuncName} Click detected inside table.dataTable td.`);
+              try {
+                  const cellIndex = Array.from(clickedTR.children).indexOf(clickedTD);
+                  const lineNode = clickedTable.closest('div.ace-line');
+                  const tblId = clickedTable.getAttribute('data-tblId');
+
+                  log(`${mousedownFuncName} Cell analysis:`);
+                  log(`${mousedownFuncName} - Cell index:`, cellIndex);
+                  log(`${mousedownFuncName} - Line node:`, !!lineNode);
+                  log(`${mousedownFuncName} - Line node ID:`, lineNode?.id);
+                  log(`${mousedownFuncName} - Table ID:`, tblId);
+
+                  // Ensure ace.rep and ace.rep.lines are available
+                  if (!ace.rep || !ace.rep.lines) {
+                      console.error(`${mousedownFuncName} ERROR: ace.rep or ace.rep.lines not available inside mousedown listener.`);
+                      return;
+                  }
+
+                  if (lineNode && lineNode.id && tblId !== null && cellIndex !== -1) {
+                      const lineNum = ace.rep.lines.indexOfKey(lineNode.id);
+                      if (lineNum !== -1) {
+                           // Store the accurately determined cell info
+                           // Initialize relative position - might be refined later if needed
+                           const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
+                           editor.ep_tables5_last_clicked = clickInfo;
+                           log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
+
+                           // TODO: Add visual class for selection if desired
+                           log(`${mousedownFuncName} TEST: Skipped adding/removing selected-table-cell class`);
+
+                      } else {
+                          log(`${mousedownFuncName} Clicked cell (ERROR): Could not find line number for node ID: ${lineNode.id}`);
+                      }
+                  } else {
+                       log(`${mousedownFuncName} Clicked cell (ERROR): Missing required info (lineNode, lineNode.id, tblId, or valid cellIndex).`, { lineNode, tblId, cellIndex });
+                  }
+              } catch (e) {
+                  console.error(`${mousedownFuncName} Error processing table cell click:`, e);
+                  log(`${mousedownFuncName} Error details:`, { message: e.message, stack: e.stack });
+                  editor.ep_tables5_last_clicked = null; // Ensure state is clear on error
+              }
+          } else {
+               log(`${mousedownFuncName} Click was outside a table.dataTable td.`);
+          }
+      });
+      log(`${func} Mousedown listeners for cell selection attached successfully (inside callWithAce).`);
+
+  }, 'tableCellSelectionPostAce', true); // Unique name for callstack
+
+  log(`${func} END`);
 };
 
 // END OF FILE

@@ -98,3 +98,68 @@
   user-select:none;
   caret-color:transparent;
 } 
+
+/* NEW: Column resize handle styles */
+.ep-tables5-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+}
+
+/* Show resize handles on hover */
+.dataTable tr:first-child td:hover .ep-tables5-resize-handle,
+.dataTable tr:first-child .ep-tables5-resize-handle:hover {
+  opacity: 0.3;
+  background: #007cff;
+}
+
+/* Visual feedback during resize */
+.dataTable.ep-tables5-resizing {
+  user-select: none;
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  -ms-user-select: none;
+  pointer-events: none; /* Prevent other interactions during resize */
+}
+
+.dataTable.ep-tables5-resizing td {
+  transition: none !important;
+  pointer-events: none; /* Prevent cell interactions during resize */
+}
+
+.dataTable.ep-tables5-resizing .ep-tables5-resize-handle {
+  opacity: 0.7 !important;
+  background: #007cff !important;
+  pointer-events: auto; /* Keep resize handle interactive */
+}
+
+/* Improve resize handle visibility on first row */
+.dataTable.dataTable-first-row tr:first-child td {
+  position: relative;
+}
+
+/* Ensure resize handles don't interfere with text selection */
+.ep-tables5-resize-handle:hover {
+  background: #007cff !important;
+  opacity: 0.5 !important;
+}
+
+/* Add a visual indicator during resize */
+.dataTable.ep-tables5-resizing::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 124, 255, 0.05);
+  pointer-events: none;
+  z-index: 5;
+} 
