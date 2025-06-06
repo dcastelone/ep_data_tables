@@ -15,6 +15,7 @@
 // ────────────────────────────── constants ──────────────────────────────
 const ATTR_TABLE_JSON = 'tbljson';
 const ATTR_CELL       = 'td';
+const ATTR_CLASS_PREFIX = 'tbljson-'; // For finding the class in DOM
 const log             = (...m) => console.debug('[ep_tables5:client_hooks]', ...m);
 const DELIMITER       = '|'; // SIMPLIFIED DELIMITER
 const HIDDEN_DELIM    = '|';        // Keep the real char for DOM alignment
@@ -56,6 +57,370 @@ let resizeOriginalWidths = [];
 let resizeTableMetadata = null;
 let resizeLineNum = -1;
 let resizeOverlay = null; // Visual overlay element
+
+// ─────────────────── Reusable Helper Functions ───────────────────
+
+/**
+ * Recursively search for an element with a 'tbljson-' class inside a given element.
+ * This is used to find the metadata carrier when it's nested inside block elements.
+ * @param {HTMLElement} element - The root element to start searching from.
+ * @returns {HTMLElement|null} - The found element or null.
+ */
+function findTbljsonElement(element) {
+  if (!element) return null;
+  // Check if this element has the tbljson class
+  if (element.classList) {
+    for (const cls of element.classList) {
+      if (cls.startsWith(ATTR_CLASS_PREFIX)) {
+        return element;
+      }
+    }
+  }
+  // Recursively check children
+  if (element.children) {
+    for (const child of element.children) {
+      const found = findTbljsonElement(child);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Gets the table metadata for a given line, falling back to a DOM search if the
+ * line attribute is not present (e.g., for block-styled lines).
+ * @param {number} lineNum - The line number.
+ * @param {object} editorInfo - The editor instance.
+ * @param {object} docManager - The document attribute manager.
+ * @returns {object|null} - The parsed metadata object or null.
+ */
+function getTableLineMetadata(lineNum, editorInfo, docManager) {
+  const funcName = 'getTableLineMetadata';
+  try {
+    // First, try the fast path: getting the attribute directly from the line.
+    const attribs = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+    if (attribs) {
+      try {
+        const metadata = JSON.parse(attribs);
+        if (metadata && metadata.tblId) {
+          log(`${funcName}: Found metadata via attribute for line ${lineNum}`);
+          return metadata;
+        }
+      } catch (e) {
+        log(`${funcName}: Invalid JSON in tbljson attribute on line ${lineNum}:`, e.message);
+      }
+    }
+
+    // Fallback for block-styled lines.
+    log(`${funcName}: No valid attribute on line ${lineNum}, checking DOM.`);
+    const rep = editorInfo.ace_getRep();
+    
+    // This is the fix: Get the lineNode directly from the rep. It's more reliable
+    // than querying the DOM and avoids the ace_getOuterDoc() call which was failing.
+    const lineEntry = rep.lines.atIndex(lineNum);
+    const lineNode = lineEntry?.lineNode;
+
+    if (!lineNode) {
+      log(`${funcName}: Could not find line node in rep for line ${lineNum}`);
+      return null;
+    }
+
+    const tbljsonElement = findTbljsonElement(lineNode);
+    if (tbljsonElement) {
+      for (const className of tbljsonElement.classList) {
+        if (className.startsWith(ATTR_CLASS_PREFIX)) {
+          const encodedData = className.substring(ATTR_CLASS_PREFIX.length);
+          try {
+            const decodedString = atob(encodedData);
+            const metadata = JSON.parse(decodedString);
+            log(`${funcName}: Reconstructed metadata from DOM for line ${lineNum}:`, metadata);
+            return metadata;
+          } catch (e) {
+            console.error(`${funcName}: Failed to decode/parse tbljson class on line ${lineNum}:`, e);
+            return null;
+          }
+        }
+      }
+    }
+
+    log(`${funcName}: Could not find table metadata for line ${lineNum} in DOM.`);
+    return null;
+  } catch (e) {
+    console.error(`[ep_tables5] ${funcName}: Error getting metadata for line ${lineNum}:`, e);
+    return null;
+  }
+}
+
+// ─────────────────── Cell Navigation Helper Functions ───────────────────
+/**
+ * Navigate to the next cell in the table (Tab key behavior)
+ * @param {number} currentLineNum - Current line number
+ * @param {number} currentCellIndex - Current cell index (0-based)
+ * @param {object} tableMetadata - Table metadata object
+ * @param {boolean} shiftKey - Whether Shift was held (for reverse navigation)
+ * @param {object} editorInfo - Editor instance
+ * @param {object} docManager - Document attribute manager
+ * @returns {boolean} - Success of navigation
+ */
+function navigateToNextCell(currentLineNum, currentCellIndex, tableMetadata, shiftKey, editorInfo, docManager) {
+  const funcName = 'navigateToNextCell';
+  log(`${funcName}: START - Current: Line=${currentLineNum}, Cell=${currentCellIndex}, Shift=${shiftKey}`);
+  
+  try {
+    let targetRow = tableMetadata.row;
+    let targetCol = currentCellIndex;
+    
+    if (shiftKey) {
+      // Shift+Tab: Move to previous cell
+      targetCol--;
+      if (targetCol < 0) {
+        // Move to last cell of previous row
+        targetRow--;
+        targetCol = tableMetadata.cols - 1;
+      }
+    } else {
+      // Tab: Move to next cell
+      targetCol++;
+      if (targetCol >= tableMetadata.cols) {
+        // Move to first cell of next row
+        targetRow++;
+        targetCol = 0;
+      }
+    }
+    
+    log(`${funcName}: Target coordinates - Row=${targetRow}, Col=${targetCol}`);
+    
+    // Find the line number for the target row
+    const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
+    if (targetLineNum === -1) {
+      log(`${funcName}: Could not find line for target row ${targetRow}`);
+      return false;
+    }
+    
+    // Navigate to the target cell
+    return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
+    
+  } catch (e) {
+    console.error(`[ep_tables5] ${funcName}: Error during navigation:`, e);
+    return false;
+  }
+}
+
+/**
+ * Navigate to the cell below in the same column (Enter key behavior)
+ * @param {number} currentLineNum - Current line number
+ * @param {number} currentCellIndex - Current cell index (0-based)
+ * @param {object} tableMetadata - Table metadata object
+ * @param {object} editorInfo - Editor instance
+ * @param {object} docManager - Document attribute manager
+ * @returns {boolean} - Success of navigation
+ */
+function navigateToCellBelow(currentLineNum, currentCellIndex, tableMetadata, editorInfo, docManager) {
+  const funcName = 'navigateToCellBelow';
+  log(`${funcName}: START - Current: Line=${currentLineNum}, Cell=${currentCellIndex}`);
+
+  try {
+    const targetRow = tableMetadata.row + 1;
+    const targetCol = currentCellIndex;
+
+    log(`${funcName}: Target coordinates - Row=${targetRow}, Col=${targetCol}`);
+
+    // Find the line number for the target row
+    const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
+
+    if (targetLineNum !== -1) {
+      // Found the row below, navigate to it.
+      log(`${funcName}: Found line for target row ${targetRow}, navigating.`);
+      return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
+    } else {
+      // Could not find the row below, we must be on the last line.
+      // Create a new, empty line after the table.
+      log(`${funcName}: Could not find next row. Creating new line after table.`);
+      const rep = editorInfo.ace_getRep();
+      const lineTextLength = rep.lines.atIndex(currentLineNum).text.length;
+      const endOfLinePos = [currentLineNum, lineTextLength];
+
+      // Move caret to end of the current line...
+      editorInfo.ace_performSelectionChange(endOfLinePos, endOfLinePos, false);
+      // ...and insert a newline character. This creates a new line below.
+      editorInfo.ace_performDocumentReplaceRange(endOfLinePos, endOfLinePos, '\n');
+
+      // The caret is automatically moved to the new line by the operation above,
+      // but we ensure the visual selection is synced and the editor is focused.
+      editorInfo.ace_updateBrowserSelectionFromRep();
+      editorInfo.ace_focus();
+
+      // We've now exited the table, so clear the last-clicked state.
+      const editor = editorInfo.editor;
+      if (editor) editor.ep_tables5_last_clicked = null;
+      log(`${funcName}: Cleared last click info as we have exited the table.`);
+
+      return true; // We handled it.
+    }
+  } catch (e) {
+    console.error(`[ep_tables5] ${funcName}: Error during navigation:`, e);
+    return false;
+  }
+}
+
+/**
+ * Find the line number for a specific table row
+ * @param {string} tblId - Table ID
+ * @param {number} targetRow - Target row index
+ * @param {object} editorInfo - Editor instance
+ * @param {object} docManager - Document attribute manager
+ * @returns {number} - Line number (-1 if not found)
+ */
+function findLineForTableRow(tblId, targetRow, editorInfo, docManager) {
+  const funcName = 'findLineForTableRow';
+  log(`${funcName}: Searching for tblId=${tblId}, row=${targetRow}`);
+  
+  try {
+    const rep = editorInfo.ace_getRep();
+    if (!rep || !rep.lines) {
+      log(`${funcName}: Could not get rep or rep.lines`);
+      return -1;
+    }
+    
+    const totalLines = rep.lines.length();
+    for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+      try {
+        let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
+        
+        // If no attribute found directly, check DOM (same logic as acePostWriteDomLineHTML)
+        if (!lineAttrString) {
+          const lineEntry = rep.lines.atIndex(lineIndex);
+          if (lineEntry && lineEntry.lineNode) {
+            const tableInDOM = lineEntry.lineNode.querySelector('table.dataTable[data-tblId]');
+            if (tableInDOM) {
+              const domTblId = tableInDOM.getAttribute('data-tblId');
+              const domRow = tableInDOM.getAttribute('data-row');
+              if (domTblId === tblId && domRow !== null && parseInt(domRow, 10) === targetRow) {
+                log(`${funcName}: Found target via DOM: line ${lineIndex}`);
+                return lineIndex;
+              }
+            }
+          }
+        }
+        
+        if (lineAttrString) {
+          const lineMetadata = JSON.parse(lineAttrString);
+          if (lineMetadata.tblId === tblId && lineMetadata.row === targetRow) {
+            log(`${funcName}: Found target via attribute: line ${lineIndex}`);
+            return lineIndex;
+          }
+        }
+      } catch (e) {
+        continue; // Skip lines with invalid metadata
+      }
+    }
+    
+    log(`${funcName}: Target row not found`);
+    return -1;
+  } catch (e) {
+    console.error(`[ep_tables5] ${funcName}: Error searching for line:`, e);
+    return -1;
+  }
+}
+
+/**
+ * Navigate to a specific cell and position caret at the end of its text
+ * @param {number} targetLineNum - Target line number
+ * @param {number} targetCellIndex - Target cell index (0-based)
+ * @param {object} editorInfo - Editor instance
+ * @param {object} docManager - Document attribute manager
+ * @returns {boolean} - Success of navigation
+ */
+function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) {
+  const funcName = 'navigateToCell';
+  log(`${funcName}: START - Target: Line=${targetLineNum}, Cell=${targetCellIndex}`);
+  let targetPos;
+
+  try {
+    const rep = editorInfo.ace_getRep();
+    if (!rep || !rep.lines) {
+      log(`${funcName}: Could not get rep or rep.lines`);
+      return false;
+    }
+    
+    const lineEntry = rep.lines.atIndex(targetLineNum);
+    if (!lineEntry) {
+      log(`${funcName}: Could not get line entry for line ${targetLineNum}`);
+      return false;
+    }
+    
+    const lineText = lineEntry.text || '';
+    const cells = lineText.split(DELIMITER);
+    
+    if (targetCellIndex >= cells.length) {
+      log(`${funcName}: Target cell ${targetCellIndex} doesn't exist (only ${cells.length} cells)`);
+      return false;
+    }
+    
+    let targetCol = 0;
+    for (let i = 0; i < targetCellIndex; i++) {
+      targetCol += (cells[i]?.length ?? 0) + DELIMITER.length;
+    }
+    const targetCellContent = cells[targetCellIndex] || '';
+    targetCol += targetCellContent.length;
+    
+    const clampedTargetCol = Math.min(targetCol, lineText.length);
+    targetPos = [targetLineNum, clampedTargetCol];
+
+    // --- NEW: Update plugin state BEFORE performing the UI action ---
+    try {
+      const editor = editorInfo.ep_tables5_editor;
+      // Use the new robust helper to get metadata, which handles block-styled lines.
+      const tableMetadata = getTableLineMetadata(targetLineNum, editorInfo, docManager);
+
+      if (editor && tableMetadata) {
+        editor.ep_tables5_last_clicked = {
+          lineNum: targetLineNum,
+          tblId: tableMetadata.tblId,
+          cellIndex: targetCellIndex,
+          relativePos: targetCellContent.length,
+        };
+        log(`${funcName}: Pre-emptively updated stored click info:`, editor.ep_tables5_last_clicked);
+      } else {
+        log(`${funcName}: Could not get table metadata for target line ${targetLineNum}, cannot update click info.`);
+      }
+    } catch (e) {
+      log(`${funcName}: Could not update stored click info before navigation:`, e.message);
+    }
+    
+    // The previous attempts involving wrappers and poking the renderer have all
+    // proven to be unstable. The correct approach is to directly update the
+    // internal model and then tell the browser to sync its visual selection to
+    // that model.
+    try {
+      // 1. Update the internal representation of the selection.
+      editorInfo.ace_performSelectionChange(targetPos, targetPos, false);
+      log(`${funcName}: Updated internal selection to [${targetPos}]`);
+
+      // 2. Explicitly tell the editor to update the browser's visual selection
+      // to match the new internal representation. This is the correct way to
+      // make the caret appear in the new location without causing a race condition.
+      editorInfo.ace_updateBrowserSelectionFromRep();
+      log(`${funcName}: Called updateBrowserSelectionFromRep to sync visual caret.`);
+      
+      // 3. Ensure the editor has focus.
+      editorInfo.ace_focus();
+      log(`${funcName}: Editor focused.`);
+
+    } catch(e) {
+      console.error(`[ep_tables5] ${funcName}: Error during direct navigation update:`, e);
+      return false;
+    }
+    
+  } catch (e) {
+    // This synchronous catch is a fallback, though the error was happening asynchronously.
+    console.error(`[ep_tables5] ${funcName}: Error during cell navigation:`, e);
+    return false;
+  }
+
+  log(`${funcName}: Navigation considered successful.`);
+  return true;
+}
 
 // ────────────────────── collectContentPre (DOM → atext) ─────────────────────
 exports.collectContentPre = (hook, ctx) => {
@@ -622,26 +987,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, finalHtmlSegments);
       log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing content.`);
       
-      // Find the element that contains the tbljson class to determine if we need to preserve block wrappers
-      function findTbljsonElement(element) {
-        // Check if this element has the tbljson class
-        if (element.classList) {
-          for (const cls of element.classList) {
-            if (cls.startsWith('tbljson-')) {
-              return element;
-            }
-          }
-        }
-        // Recursively check children
-        if (element.children) {
-          for (const child of element.children) {
-            const found = findTbljsonElement(child);
-            if (found) return found;
-          }
-        }
-        return null;
-      }
-      
+      // The old local findTbljsonElement is removed from here. We use the global one now.
       const tbljsonElement = findTbljsonElement(node);
       
       // If we found a tbljson element and it's nested in a block element, 
@@ -1115,19 +1461,41 @@ exports.aceKeyEvent = (h, ctx) => {
       return false;
   }
 
-  // 2. Handle Tab - Prevent default (implement navigation later)
+  // 2. Handle Tab - Navigate to next cell (only on keydown to avoid double navigation)
   if (isTabKey) { 
-     log(`${logPrefix} Tab key pressed. Preventing default.`);
+     log(`${logPrefix} Tab key pressed. Event type: ${evt.type}`);
      evt.preventDefault();
-     // TODO: Implement cell navigation logic
+     
+     // Only process keydown events for navigation to avoid double navigation
+     if (evt.type !== 'keydown') {
+       log(`${logPrefix} Ignoring Tab ${evt.type} event to prevent double navigation.`);
+       return true;
+     }
+     
+     log(`${logPrefix} Processing Tab keydown - implementing cell navigation.`);
+     const success = navigateToNextCell(currentLineNum, targetCellIndex, metadataForTargetLine, evt.shiftKey, editorInfo, docManager);
+     if (!success) {
+       log(`${logPrefix} Tab navigation failed, cell navigation not possible.`);
+     }
      return true;
   }
 
-  // 3. Handle Enter - Prevent default (usually splits the line)
+  // 3. Handle Enter - Navigate to cell below (only on keydown to avoid double navigation)
   if (isEnterKey) {
-      log(`${logPrefix} Enter key pressed. Preventing default line split.`);
+      log(`${logPrefix} Enter key pressed. Event type: ${evt.type}`);
       evt.preventDefault();
-      // Optional TODO: Implement behavior like moving to the next row/cell?
+      
+      // Only process keydown events for navigation to avoid double navigation
+      if (evt.type !== 'keydown') {
+        log(`${logPrefix} Ignoring Enter ${evt.type} event to prevent double navigation.`);
+        return true;
+      }
+      
+      log(`${logPrefix} Processing Enter keydown - implementing cell navigation.`);
+      const success = navigateToCellBelow(currentLineNum, targetCellIndex, metadataForTargetLine, editorInfo, docManager);
+      if (!success) {
+        log(`${logPrefix} Enter navigation failed, cell navigation not possible.`);
+      }
       return true; 
   }
 
