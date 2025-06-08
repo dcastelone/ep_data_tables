@@ -1444,6 +1444,18 @@ exports.aceKeyEvent = (h, ctx) => {
   }
   // --- END NEW: Handle Highlight Deletion/Replacement ---
 
+  // --- Check for Ctrl+X (Cut) key combination ---
+  const isCutKey = (evt.ctrlKey || evt.metaKey) && (evt.key === 'x' || evt.key === 'X' || evt.keyCode === 88);
+  if (isCutKey && hasSelection) {
+    log(`${logPrefix} Ctrl+X (Cut) detected with selection. Letting cut event handler manage this.`);
+    // Let the cut event handler handle this - we don't need to preventDefault here
+    // as the cut event will handle the operation and prevent default
+    return false; // Allow the cut event to be triggered
+  } else if (isCutKey && !hasSelection) {
+    log(`${logPrefix} Ctrl+X (Cut) detected but no selection. Allowing default.`);
+    return false; // Allow default - nothing to cut
+  }
+
   // --- Define Key Types ---
   const isTypingKey = evt.key && evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey;
   const isDeleteKey = evt.key === 'Delete' || evt.keyCode === 46;
@@ -1451,7 +1463,7 @@ exports.aceKeyEvent = (h, ctx) => {
   const isNavigationKey = [33, 34, 35, 36, 37, 38, 39, 40].includes(evt.keyCode);
   const isTabKey = evt.key === 'Tab';
   const isEnterKey = evt.key === 'Enter';
-  log(`${logPrefix} Key classification: Typing=${isTypingKey}, Backspace=${isBackspaceKey}, Delete=${isDeleteKey}, Nav=${isNavigationKey}, Tab=${isTabKey}, Enter=${isEnterKey}`);
+  log(`${logPrefix} Key classification: Typing=${isTypingKey}, Backspace=${isBackspaceKey}, Delete=${isDeleteKey}, Nav=${isNavigationKey}, Tab=${isTabKey}, Enter=${isEnterKey}, Cut=${isCutKey}`);
 
   // --- Handle Keys --- 
 
@@ -1735,6 +1747,219 @@ exports.aceInitialized = (h, ctx) => {
       log(`${callWithAceLogPrefix} $inner is invalid. Aborting.`);
       return;
     }
+
+    // *** CUT EVENT LISTENER ***
+    log(`${callWithAceLogPrefix} Attaching cut event listener to $inner (inner iframe body).`);
+    $inner.on('cut', (evt) => {
+      const cutLogPrefix = '[ep_tables5:cutHandler]';
+      log(`${cutLogPrefix} CUT EVENT TRIGGERED. Event object:`, evt);
+
+      log(`${cutLogPrefix} Getting current editor representation (rep).`);
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) {
+        log(`${cutLogPrefix} WARNING: Could not get representation or selection. Allowing default cut.`);
+        console.warn(`${cutLogPrefix} Could not get rep or selStart.`);
+        return; // Allow default
+      }
+      log(`${cutLogPrefix} Rep obtained. selStart:`, rep.selStart, `selEnd:`, rep.selEnd);
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+      log(`${cutLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
+
+      // Check if there's actually a selection to cut
+      if (selStart[0] === selEnd[0] && selStart[1] === selEnd[1]) {
+        log(`${cutLogPrefix} No selection to cut. Allowing default cut.`);
+        return; // Allow default - nothing to cut
+      }
+
+      // Check if selection spans multiple lines
+      if (selStart[0] !== selEnd[0]) {
+        log(`${cutLogPrefix} WARNING: Selection spans multiple lines. Preventing cut to protect table structure.`);
+        evt.preventDefault();
+        return;
+      }
+
+      log(`${cutLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      if (!lineAttrString) {
+        log(`${cutLogPrefix} Line ${lineNum} is NOT a table line (no '${ATTR_TABLE_JSON}' attribute found). Allowing default cut.`);
+        return; // Not a table line
+      }
+      log(`${cutLogPrefix} Line ${lineNum} IS a table line. Attribute string: "${lineAttrString}".`);
+
+      let tableMetadata;
+      try {
+        log(`${cutLogPrefix} Parsing table metadata from attribute string.`);
+        tableMetadata = JSON.parse(lineAttrString);
+        log(`${cutLogPrefix} Parsed table metadata:`, tableMetadata);
+        if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+          log(`${cutLogPrefix} WARNING: Invalid or incomplete table metadata on line ${lineNum}. Allowing default cut. Metadata:`, tableMetadata);
+          console.warn(`${cutLogPrefix} Invalid table metadata for line ${lineNum}.`);
+          return; // Allow default
+        }
+        log(`${cutLogPrefix} Table metadata validated successfully: tblId=${tableMetadata.tblId}, row=${tableMetadata.row}, cols=${tableMetadata.cols}.`);
+      } catch(e) {
+        console.error(`${cutLogPrefix} ERROR parsing table metadata for line ${lineNum}:`, e);
+        log(`${cutLogPrefix} Metadata parse error. Allowing default cut. Error details:`, { message: e.message, stack: e.stack });
+        return; // Allow default
+      }
+
+      // Validate selection is within cell boundaries
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+
+      for (let i = 0; i < cells.length; i++) {
+        const cellLength = cells[i]?.length ?? 0;
+        const cellEndColThisIteration = currentOffset + cellLength;
+        
+        if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = cellEndColThisIteration;
+          break;
+        }
+        currentOffset += cellLength + DELIMITER.length;
+      }
+
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
+        log(`${cutLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing cut to protect table structure.`);
+        evt.preventDefault();
+        return;
+      }
+
+      // If we reach here, the selection is entirely within a single cell - allow cut and preserve table structure
+      log(`${cutLogPrefix} Selection is entirely within cell ${targetCellIndex}. Intercepting cut to preserve table structure.`);
+      evt.preventDefault();
+
+      try {
+        // Get the selected text to copy to clipboard
+        const selectedText = lineText.substring(selStart[1], selEnd[1]);
+        log(`${cutLogPrefix} Selected text to cut: "${selectedText}"`);
+
+        // Copy to clipboard manually
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(selectedText).then(() => {
+            log(`${cutLogPrefix} Successfully copied to clipboard via Navigator API.`);
+          }).catch((err) => {
+            console.warn(`${cutLogPrefix} Failed to copy to clipboard via Navigator API:`, err);
+          });
+        } else {
+          // Fallback for older browsers
+          log(`${cutLogPrefix} Using fallback clipboard method.`);
+          const textArea = document.createElement('textarea');
+          textArea.value = selectedText;
+          document.body.appendChild(textArea);
+          textArea.select();
+          try {
+            document.execCommand('copy');
+            log(`${cutLogPrefix} Successfully copied to clipboard via execCommand fallback.`);
+          } catch (err) {
+            console.warn(`${cutLogPrefix} Failed to copy to clipboard via fallback:`, err);
+          }
+          document.body.removeChild(textArea);
+        }
+
+        // Now perform the deletion within the cell using ace operations
+        log(`${cutLogPrefix} Performing deletion via ed.ace_callWithAce.`);
+        ed.ace_callWithAce((aceInstance) => {
+          const callAceLogPrefix = `${cutLogPrefix}[ace_callWithAceOps]`;
+          log(`${callAceLogPrefix} Entered ace_callWithAce for cut operations. selStart:`, selStart, `selEnd:`, selEnd);
+          
+          log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to delete selected text.`);
+          aceInstance.ace_performDocumentReplaceRange(selStart, selEnd, '');
+          log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
+
+          log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
+          const repAfterCut = aceInstance.ace_getRep();
+          log(`${callAceLogPrefix} Fetched rep after cut for applyMeta. Line ${lineNum} text now: "${repAfterCut.lines.atIndex(lineNum).text}"`);
+          
+          ed.ep_tables5_applyMeta(
+            lineNum,
+            tableMetadata.tblId,
+            tableMetadata.row,
+            tableMetadata.cols,
+            repAfterCut,
+            ed,
+            null,
+            docManager
+          );
+          log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+
+          const newCaretPos = [lineNum, selStart[1]];
+          log(`${callAceLogPrefix} Setting caret position to: [${newCaretPos}].`);
+          aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+          log(`${callAceLogPrefix} Selection change successful.`);
+
+          log(`${callAceLogPrefix} Cut operations within ace_callWithAce completed successfully.`);
+        }, 'tableCutTextOperations', true);
+
+        log(`${cutLogPrefix} Cut operation completed successfully.`);
+      } catch (error) {
+        console.error(`${cutLogPrefix} ERROR during cut operation:`, error);
+        log(`${cutLogPrefix} Cut operation failed. Error details:`, { message: error.message, stack: error.stack });
+      }
+    });
+
+    // *** DRAG AND DROP EVENT LISTENERS ***
+    log(`${callWithAceLogPrefix} Attaching drag and drop event listeners to $inner (inner iframe body).`);
+    
+    // Prevent drops that could damage table structure
+    $inner.on('drop', (evt) => {
+      const dropLogPrefix = '[ep_tables5:dropHandler]';
+      log(`${dropLogPrefix} DROP EVENT TRIGGERED. Event object:`, evt);
+
+      log(`${dropLogPrefix} Getting current editor representation (rep).`);
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) {
+        log(`${dropLogPrefix} WARNING: Could not get representation or selection. Allowing default drop.`);
+        return; // Allow default
+      }
+
+      const selStart = rep.selStart;
+      const lineNum = selStart[0];
+      log(`${dropLogPrefix} Current line number: ${lineNum}.`);
+
+      // Check if we're dropping onto a table line
+      log(`${dropLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      if (!lineAttrString) {
+        log(`${dropLogPrefix} Line ${lineNum} is NOT a table line (no '${ATTR_TABLE_JSON}' attribute found). Allowing default drop.`);
+        return; // Not a table line
+      }
+
+      log(`${dropLogPrefix} Line ${lineNum} IS a table line. Preventing drop to protect table structure.`);
+      evt.preventDefault();
+      evt.stopPropagation();
+      
+      // Show user feedback that drop was prevented
+      console.warn('[ep_tables5] Drop operation prevented to protect table structure. Please use copy/paste within table cells.');
+      log(`${dropLogPrefix} Drop operation prevented to protect table structure.`);
+    });
+
+    // Also prevent dragover to ensure drop events are properly handled
+    $inner.on('dragover', (evt) => {
+      const dragLogPrefix = '[ep_tables5:dragoverHandler]';
+      
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) {
+        return; // Allow default
+      }
+
+      const selStart = rep.selStart;
+      const lineNum = selStart[0];
+
+      // Check if we're dragging over a table line
+      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      if (lineAttrString) {
+        log(`${dragLogPrefix} Preventing dragover on table line ${lineNum} to control drop handling.`);
+        evt.preventDefault(); // Necessary to enable drop event handling
+      }
+    });
 
     // *** EXISTING PASTE LISTENER ***
     log(`${callWithAceLogPrefix} Attaching paste event listener to $inner (inner iframe body).`);
