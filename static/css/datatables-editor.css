@@ -113,6 +113,8 @@
   transition: opacity 0.2s ease;
 }
 
+
+
 /* Show resize handles on hover */
 .dataTable tr:first-child td:hover .ep-tables5-resize-handle,
 .dataTable tr:first-child .ep-tables5-resize-handle:hover {

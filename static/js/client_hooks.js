@@ -680,7 +680,8 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     const resizeHandle = !isLastColumn ? 
       `<div class="ep-tables5-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
     
-    const tdContent = `<td style="${cellStyle}" data-column="${index}">${hidden}${cellContent}${resizeHandle}</td>`;
+    const caretAnchor = '<span class="ep-tables5-caret-anchor"></span>';
+    const tdContent = `<td style="${cellStyle}" data-column="${index}">${hidden}${cellContent}${caretAnchor}${resizeHandle}</td>`;
     log(`${funcName}: Generated TD HTML for segment ${index}:`, tdContent);
     return tdContent;
   }).join('');
@@ -3075,7 +3076,7 @@ exports.aceSetAuthorStyle = (hook, ctx) => {
 exports.aceEditorCSS                = () => { 
   // Path relative to Etherpad's static/plugins/ directory
   // Format should be: pluginName/path/to/file.css
-  return ['ep_tables5/static/css/datatables-editor.css'];
+  return ['ep_tables5/static/css/datatables-editor.css', 'ep_tables5/static/css/caret.css'];
 };
 
 // Register TABLE as a block element, hoping it influences rendering behavior

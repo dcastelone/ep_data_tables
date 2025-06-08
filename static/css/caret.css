@@ -1,0 +1,13 @@
+/*
+ * This class creates an invisible, zero-width inline box with a height.
+ * This satisfies Blink/Chrome's requirement for a renderable "caret anchor"
+ * inside an otherwise empty editable element, ensuring the caret is
+ * always visible.
+ */
+.ep-tables5-caret-anchor {
+  display: inline-block;
+  width: 0;
+  height: 1em;
+  pointer-events: none;
+  user-select: none;
+} 
