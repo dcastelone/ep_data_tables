@@ -101,7 +101,7 @@ function getTableLineMetadata(lineNum, editorInfo, docManager) {
     const attribs = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
     if (attribs) {
       try {
-        const metadata = JSON.parse(attribs);
+      const metadata = JSON.parse(attribs);
         if (metadata && metadata.tblId) {
           log(`${funcName}: Found metadata via attribute for line ${lineNum}`);
           return metadata;
@@ -167,38 +167,38 @@ function navigateToNextCell(currentLineNum, currentCellIndex, tableMetadata, shi
   log(`${funcName}: START - Current: Line=${currentLineNum}, Cell=${currentCellIndex}, Shift=${shiftKey}`);
   
   try {
-    let targetRow = tableMetadata.row;
+  let targetRow = tableMetadata.row;
     let targetCol = currentCellIndex;
-    
+
     if (shiftKey) {
       // Shift+Tab: Move to previous cell
       targetCol--;
-      if (targetCol < 0) {
+  if (targetCol < 0) {
         // Move to last cell of previous row
-        targetRow--;
-        targetCol = tableMetadata.cols - 1;
+    targetRow--;
+    targetCol = tableMetadata.cols - 1;
       }
     } else {
       // Tab: Move to next cell
       targetCol++;
       if (targetCol >= tableMetadata.cols) {
         // Move to first cell of next row
-        targetRow++;
-        targetCol = 0;
+    targetRow++;
+    targetCol = 0;
       }
-    }
-    
+  }
+
     log(`${funcName}: Target coordinates - Row=${targetRow}, Col=${targetCol}`);
     
     // Find the line number for the target row
-    const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
+  const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
     if (targetLineNum === -1) {
       log(`${funcName}: Could not find line for target row ${targetRow}`);
       return false;
     }
-    
+
     // Navigate to the target cell
-    return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
+  return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
     
   } catch (e) {
     console.error(`[ep_tables5] ${funcName}: Error during navigation:`, e);
@@ -220,15 +220,15 @@ function navigateToCellBelow(currentLineNum, currentCellIndex, tableMetadata, ed
   log(`${funcName}: START - Current: Line=${currentLineNum}, Cell=${currentCellIndex}`);
 
   try {
-    const targetRow = tableMetadata.row + 1;
+  const targetRow = tableMetadata.row + 1;
     const targetCol = currentCellIndex;
 
     log(`${funcName}: Target coordinates - Row=${targetRow}, Col=${targetCol}`);
 
     // Find the line number for the target row
-    const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
+  const targetLineNum = findLineForTableRow(tableMetadata.tblId, targetRow, editorInfo, docManager);
 
-    if (targetLineNum !== -1) {
+  if (targetLineNum !== -1) {
       // Found the row below, navigate to it.
       log(`${funcName}: Found line for target row ${targetRow}, navigating.`);
       return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
@@ -236,19 +236,19 @@ function navigateToCellBelow(currentLineNum, currentCellIndex, tableMetadata, ed
       // Could not find the row below, we must be on the last line.
       // Create a new, empty line after the table.
       log(`${funcName}: Could not find next row. Creating new line after table.`);
-      const rep = editorInfo.ace_getRep();
+  const rep = editorInfo.ace_getRep();
       const lineTextLength = rep.lines.atIndex(currentLineNum).text.length;
       const endOfLinePos = [currentLineNum, lineTextLength];
 
       // Move caret to end of the current line...
       editorInfo.ace_performSelectionChange(endOfLinePos, endOfLinePos, false);
       // ...and insert a newline character. This creates a new line below.
-      editorInfo.ace_performDocumentReplaceRange(endOfLinePos, endOfLinePos, '\n');
+  editorInfo.ace_performDocumentReplaceRange(endOfLinePos, endOfLinePos, '\n');
 
       // The caret is automatically moved to the new line by the operation above,
       // but we ensure the visual selection is synced and the editor is focused.
       editorInfo.ace_updateBrowserSelectionFromRep();
-      editorInfo.ace_focus();
+  editorInfo.ace_focus();
 
       // We've now exited the table, so clear the last-clicked state.
       const editor = editorInfo.editor;
@@ -276,13 +276,13 @@ function findLineForTableRow(tblId, targetRow, editorInfo, docManager) {
   log(`${funcName}: Searching for tblId=${tblId}, row=${targetRow}`);
   
   try {
-    const rep = editorInfo.ace_getRep();
+  const rep = editorInfo.ace_getRep();
     if (!rep || !rep.lines) {
       log(`${funcName}: Could not get rep or rep.lines`);
       return -1;
     }
     
-    const totalLines = rep.lines.length();
+  const totalLines = rep.lines.length();
     for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
       try {
         let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
@@ -319,7 +319,7 @@ function findLineForTableRow(tblId, targetRow, editorInfo, docManager) {
     return -1;
   } catch (e) {
     console.error(`[ep_tables5] ${funcName}: Error searching for line:`, e);
-    return -1;
+  return -1;
   }
 }
 
@@ -348,7 +348,7 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
       log(`${funcName}: Could not get line entry for line ${targetLineNum}`);
       return false;
     }
-    
+
     const lineText = lineEntry.text || '';
     const cells = lineText.split(DELIMITER);
     
@@ -356,14 +356,14 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
       log(`${funcName}: Target cell ${targetCellIndex} doesn't exist (only ${cells.length} cells)`);
       return false;
     }
-    
+
     let targetCol = 0;
     for (let i = 0; i < targetCellIndex; i++) {
       targetCol += (cells[i]?.length ?? 0) + DELIMITER.length;
     }
     const targetCellContent = cells[targetCellIndex] || '';
     targetCol += targetCellContent.length;
-    
+
     const clampedTargetCol = Math.min(targetCol, lineText.length);
     targetPos = [targetLineNum, clampedTargetCol];
 
@@ -371,15 +371,15 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
     try {
       const editor = editorInfo.ep_tables5_editor;
       // Use the new robust helper to get metadata, which handles block-styled lines.
-      const tableMetadata = getTableLineMetadata(targetLineNum, editorInfo, docManager);
+    const tableMetadata = getTableLineMetadata(targetLineNum, editorInfo, docManager);
 
-      if (editor && tableMetadata) {
-        editor.ep_tables5_last_clicked = {
-          lineNum: targetLineNum,
-          tblId: tableMetadata.tblId,
-          cellIndex: targetCellIndex,
-          relativePos: targetCellContent.length,
-        };
+    if (editor && tableMetadata) {
+      editor.ep_tables5_last_clicked = {
+        lineNum: targetLineNum,
+        tblId: tableMetadata.tblId,
+        cellIndex: targetCellIndex,
+        relativePos: targetCellContent.length,
+      };
         log(`${funcName}: Pre-emptively updated stored click info:`, editor.ep_tables5_last_clicked);
       } else {
         log(`${funcName}: Could not get table metadata for target line ${targetLineNum}, cannot update click info.`);
@@ -394,17 +394,17 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
     // that model.
     try {
       // 1. Update the internal representation of the selection.
-      editorInfo.ace_performSelectionChange(targetPos, targetPos, false);
+    editorInfo.ace_performSelectionChange(targetPos, targetPos, false);
       log(`${funcName}: Updated internal selection to [${targetPos}]`);
 
       // 2. Explicitly tell the editor to update the browser's visual selection
       // to match the new internal representation. This is the correct way to
       // make the caret appear in the new location without causing a race condition.
-      editorInfo.ace_updateBrowserSelectionFromRep();
+    editorInfo.ace_updateBrowserSelectionFromRep();
       log(`${funcName}: Called updateBrowserSelectionFromRep to sync visual caret.`);
       
       // 3. Ensure the editor has focus.
-      editorInfo.ace_focus();
+    editorInfo.ace_focus();
       log(`${funcName}: Editor focused.`);
 
     } catch(e) {
@@ -436,44 +436,43 @@ exports.collectContentPre = (hook, ctx) => {
     const tableNode = node.querySelector('table.dataTable[data-tblId]');
     if (tableNode) {
       log(`${funcName}: Found ace-line with rendered table. Attempting reconstruction from DOM.`);
-      
-      const docManager = cc.documentAttributeManager;
-      const rep = cc.rep;
-      const lineNum = rep?.lines?.indexOfKey(node.id);
+
+    const docManager = cc.documentAttributeManager;
+    const rep = cc.rep;
+    const lineNum = rep?.lines?.indexOfKey(node.id);
 
       if (typeof lineNum === 'number' && lineNum >= 0 && docManager) {
         log(`${funcName}: Processing line ${lineNum} (NodeID: ${node.id}) for DOM reconstruction.`);
-        try {
-          const existingAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+    try {
+      const existingAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
           log(`${funcName}: Line ${lineNum} existing ${ATTR_TABLE_JSON} attribute: '${existingAttrString}'`);
 
           if (existingAttrString) {
-            const existingMetadata = JSON.parse(existingAttrString);
+      const existingMetadata = JSON.parse(existingAttrString);
             if (existingMetadata && typeof existingMetadata.tblId !== 'undefined' &&
                 typeof existingMetadata.row !== 'undefined' && typeof existingMetadata.cols === 'number') {
               log(`${funcName}: Line ${lineNum} existing metadata is valid:`, existingMetadata);
 
-              const trNode = tableNode.querySelector('tbody > tr');
+      const trNode = tableNode.querySelector('tbody > tr');
               if (trNode) {
                 log(`${funcName}: Line ${lineNum} found <tr> node for cell content extraction.`);
                 let cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
-                  let segmentHTML = td.innerHTML || '';
+        let segmentHTML = td.innerHTML || '';
                   log(`${funcName}: Line ${lineNum} TD[${index}] raw innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
                   
                   const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
                   segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
 
-                  if (index > 0) {
-                    const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|(<\/span>)?<\/span>/i;
-                    segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
-                  }
+        const hidden = index === 0 ? '' :
+        /* keep the char in the DOM but make it visually disappear and non-editable */
+        `<span class="ep-tables5-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
                   log(`${funcName}: Line ${lineNum} TD[${index}] cleaned innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
-                  return segmentHTML;
-                });
-                
-                if (cellHTMLSegments.length !== existingMetadata.cols) {
+        return segmentHTML;
+      });
+
+      if (cellHTMLSegments.length !== existingMetadata.cols) {
                     log(`${funcName}: WARNING Line ${lineNum}: Reconstructed cell count (${cellHTMLSegments.length}) does not match metadata cols (${existingMetadata.cols}). Padding/truncating.`);
-                    while (cellHTMLSegments.length < existingMetadata.cols) cellHTMLSegments.push('&nbsp;');
+        while (cellHTMLSegments.length < existingMetadata.cols) cellHTMLSegments.push('&nbsp;');
                     if (cellHTMLSegments.length > existingMetadata.cols) cellHTMLSegments.length = existingMetadata.cols;
                 }
 
@@ -483,7 +482,7 @@ exports.collectContentPre = (hook, ctx) => {
 
                 state.lineAttributes = state.lineAttributes || [];
                 state.lineAttributes = state.lineAttributes.filter(attr => attr[0] !== ATTR_TABLE_JSON);
-                state.lineAttributes.push([ATTR_TABLE_JSON, existingAttrString]);
+      state.lineAttributes.push([ATTR_TABLE_JSON, existingAttrString]);
                 log(`${funcName}: Line ${lineNum} ensured ${ATTR_TABLE_JSON} attribute is in state.lineAttributes.`);
                 
                 log(`${funcName}: Line ${lineNum} reconstruction complete. Returning undefined to prevent default DOM collection.`);
@@ -511,7 +510,7 @@ exports.collectContentPre = (hook, ctx) => {
                   const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
                   segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
                   if (index > 0) {
-                    const hiddenDelimRegex = /^<span class="ep-tables5-delim">\|(<\/span>)?<\/span>/i;
+                    const hiddenDelimRegex = /^<span class="ep-tables5-delim" contenteditable="false">\|(<\/span>)?<\/span>/i;
                     segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
                   }
                   return segmentHTML;
@@ -534,7 +533,7 @@ exports.collectContentPre = (hook, ctx) => {
                  log(`${funcName}: Line ${lineNum} FALLBACK: Could not reconstruct from DOM attributes due to missing info.`);
             }
           }
-        } catch (e) {
+    } catch (e) {
           console.error(`[ep_tables5] ${funcName}: Line ${lineNum} error during DOM reconstruction:`, e);
           log(`${funcName}: Line ${lineNum} Exception details:`, { message: e.message, stack: e.stack });
         }
@@ -562,13 +561,13 @@ exports.collectContentPre = (hook, ctx) => {
       try {
         const decodedMetadata = dec(encodedMetadata);
         if (decodedMetadata) {
-            cc.doAttrib(state, `${ATTR_TABLE_JSON}::${decodedMetadata}`);
+          cc.doAttrib(state, `${ATTR_TABLE_JSON}::${decodedMetadata}`);
             appliedAttribFromClass = true;
             log(`${funcName}: Secondary path - Applied attribute to OP via cc.doAttrib for class ${cls.substring(0, 20)}... on ${node?.tagName}`);
           } else {
             log(`${funcName}: Secondary path - ERROR - Decoded metadata is null or empty for class ${cls}`);
-    }
-  } catch (e) {
+        }
+      } catch (e) {
           console.error(`[ep_tables5] ${funcName}: Secondary path - Error processing tbljson class ${cls} on ${node?.tagName}:`, e);
       }
         break; 
@@ -665,24 +664,32 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
 
   // Map the HTML segments directly into TD elements with column widths
   const cellsHtml = innerHTMLSegments.map((segment, index) => {
-    const hidden = index === 0 ? '' :
-      /* keep the char in the DOM but make it visually disappear */
-      `<span class="ep-tables5-delim">${HIDDEN_DELIM}</span>`;
-    const cellContent = segment || '&nbsp;'; // Use non-breaking space for empty segments
-    log(`${funcName}: Processing segment ${index}. Content:`, segment); // Log segment content
-    
-    // Calculate width percentage for this column
+    // Build the hidden delimiter *inside* the first author span so the caret
+    // cannot sit between delimiter and text.
+    let modifiedSegment = segment || '&nbsp;';
+    if (index > 0) {
+      const delimSpan = `<span class="ep-tables5-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
+      // If the rendered segment already starts with a <span …> (which will be
+      // the usual author-colour wrapper) inject the delimiter right after that
+      // opening tag; otherwise just prefix it.
+      modifiedSegment = modifiedSegment.replace(/^(<span[^>]*>)/i, `$1${delimSpan}`);
+      if (modifiedSegment === segment) modifiedSegment = `${delimSpan}${modifiedSegment}`;
+    }
+
+    // --- NEW: Always embed the invisible caret-anchor as *last* child *within* the first author span ---
+    const caretAnchorSpan = '<span class="ep-tables5-caret-anchor" contenteditable="false"></span>';
+    const anchorInjected = modifiedSegment.replace(/<\/span>\s*$/i, `${caretAnchorSpan}</span>`);
+    modifiedSegment = (anchorInjected !== modifiedSegment) ? anchorInjected : `${modifiedSegment}${caretAnchorSpan}`;
+
+    // Width & other decorations remain unchanged
     const widthPercent = columnWidths[index] || (100 / numCols);
     const cellStyle = `${tdStyle} width: ${widthPercent}%;`;
-    
-    // Add resize handle to all rows (not just first row), except the last column
+
     const isLastColumn = index === innerHTMLSegments.length - 1;
     const resizeHandle = !isLastColumn ? 
       `<div class="ep-tables5-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
-    
-    const caretAnchor = '<span class="ep-tables5-caret-anchor"></span>';
-    const tdContent = `<td style="${cellStyle}" data-column="${index}">${hidden}${cellContent}${caretAnchor}${resizeHandle}</td>`;
-    log(`${funcName}: Generated TD HTML for segment ${index}:`, tdContent);
+
+    const tdContent = `<td style="${cellStyle}" data-column="${index}">${modifiedSegment}${resizeHandle}</td>`;
     return tdContent;
   }).join('');
   log(`${funcName}: Joined all cellsHtml:`, cellsHtml);
@@ -712,7 +719,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   if (!node || !nodeId) {
       log(`${logPrefix} ERROR - Received invalid node or node without ID. Aborting.`);
       console.error(`[ep_tables5] ${funcName}: Received invalid node or node without ID.`);
-      return cb();
+    return cb();
   }
 
   // *** ENHANCED DEBUG: Log complete DOM state ***
@@ -850,11 +857,11 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   }
 
   log(`${logPrefix} NodeID#${nodeId}: Decoding and parsing metadata...`);
-  try { 
-      const decoded = dec(encodedJsonString); 
+  try {
+    const decoded = dec(encodedJsonString);
       log(`${logPrefix} NodeID#${nodeId}: Decoded string: ${decoded}`);
       if (!decoded) throw new Error('Decoded string is null or empty.');
-      rowMetadata = JSON.parse(decoded);
+    rowMetadata = JSON.parse(decoded);
       log(`${logPrefix} NodeID#${nodeId}: Parsed rowMetadata:`, rowMetadata);
 
       // Validate essential metadata
@@ -869,7 +876,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       // Optionally render an error state in the node?
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Invalid table metadata attribute found.</div>';
       log(`${logPrefix} NodeID#${nodeId}: Rendered error message in node. END.`);
-      return cb(); 
+    return cb();
   }
   // --- End Metadata Parsing ---
 
@@ -951,26 +958,26 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       // ENHANCED: Always reconstruct the correct structure based on metadata
       const reconstructedSegments = [];
       
-      if (htmlSegments.length === 1 && rowMetadata.cols > 1) {
+    if (htmlSegments.length === 1 && rowMetadata.cols > 1) {
           // Single segment case - put all content in first column, empty remaining columns
           log(`${logPrefix} NodeID#${nodeId}: Single segment detected, distributing content to first column of ${rowMetadata.cols} columns.`);
           reconstructedSegments.push(htmlSegments[0]);
-          for (let i = 1; i < rowMetadata.cols; i++) {
+      for (let i = 1; i < rowMetadata.cols; i++) {
               reconstructedSegments.push('&nbsp;');
-          }
-      } else if (htmlSegments.length > rowMetadata.cols) {
+      }
+    } else if (htmlSegments.length > rowMetadata.cols) {
           // Too many segments - merge excess into last column
           log(`${logPrefix} NodeID#${nodeId}: Too many segments (${htmlSegments.length}), merging excess into ${rowMetadata.cols} columns.`);
-          for (let i = 0; i < rowMetadata.cols - 1; i++) {
+      for (let i = 0; i < rowMetadata.cols - 1; i++) {
               reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
-          }
+      }
           // Merge remaining segments into last column
           const remainingSegments = htmlSegments.slice(rowMetadata.cols - 1);
           reconstructedSegments.push(remainingSegments.join('|') || '&nbsp;');
-  } else {
+    } else {
           // Too few segments - pad with empty columns
           log(`${logPrefix} NodeID#${nodeId}: Too few segments (${htmlSegments.length}), padding to ${rowMetadata.cols} columns.`);
-          for (let i = 0; i < rowMetadata.cols; i++) {
+      for (let i = 0; i < rowMetadata.cols; i++) {
               reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
           }
       }
@@ -984,8 +991,8 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
 
   // --- 3. Build and Render Table ---
   log(`${logPrefix} NodeID#${nodeId}: Calling buildTableFromDelimitedHTML...`);
-      try {
-      const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, finalHtmlSegments);
+  try {
+    const newTableHTML = buildTableFromDelimitedHTML(rowMetadata, finalHtmlSegments);
       log(`${logPrefix} NodeID#${nodeId}: Received new table HTML from helper. Replacing content.`);
       
       // The old local findTbljsonElement is removed from here. We use the global one now.
@@ -996,15 +1003,15 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       if (tbljsonElement && tbljsonElement.parentElement && tbljsonElement.parentElement !== node) {
         // Check if the parent is a block-level element that should be preserved
         const parentTag = tbljsonElement.parentElement.tagName.toLowerCase();
-        const blockElements = ['center', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'right', 'left', 'ul', 'ol', 'li', 'code'];
-        
+    const blockElements = ['center', 'div', 'p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'pre', 'right', 'left', 'ul', 'ol', 'li', 'code'];
+    
         if (blockElements.includes(parentTag)) {
           log(`${logPrefix} NodeID#${nodeId}: Preserving block element ${parentTag} and replacing its content with table.`);
           tbljsonElement.parentElement.innerHTML = newTableHTML;
-        } else {
+    } else {
           log(`${logPrefix} NodeID#${nodeId}: Parent element ${parentTag} is not a block element, replacing entire node content.`);
-          node.innerHTML = newTableHTML;
-        }
+      node.innerHTML = newTableHTML;
+    }
       } else {
       // Replace the node's content entirely with the generated table
         log(`${logPrefix} NodeID#${nodeId}: No nested block element found, replacing entire node content.`);
@@ -1012,7 +1019,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       }
       
       log(`${logPrefix} NodeID#${nodeId}: Successfully replaced content with new table structure.`);
-      } catch (renderError) {
+  } catch (renderError) {
       log(`${logPrefix} NodeID#${nodeId}: ERROR during table building or rendering.`, renderError);
       console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error building/rendering table.`, renderError);
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Failed to render table structure.</div>';
@@ -1303,9 +1310,9 @@ exports.aceKeyEvent = (h, ctx) => {
   // --- Final Validation --- 
   if (currentLineNum < 0 || targetCellIndex < 0 || !metadataForTargetLine || targetCellIndex >= metadataForTargetLine.cols) {
        log(`${logPrefix} FAILED final validation: Line=${currentLineNum}, Cell=${targetCellIndex}, Metadata=${!!metadataForTargetLine}. Allowing default.`);
-       if (editor) editor.ep_tables5_last_clicked = null; 
-       return false; 
-      }
+    if (editor) editor.ep_tables5_last_clicked = null;
+    return false;
+  }
 
   log(`${logPrefix} --> Final Target: Line=${currentLineNum}, CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}`);
   // --- End Cell/Position Determination ---
@@ -1339,10 +1346,10 @@ exports.aceKeyEvent = (h, ctx) => {
       selectionStartColInLine >= cellContentStartColInLine &&
       selectionEndColInLine <= cellContentEndColInLine;
 
-    log(`${logPrefix} [selection] Checking if selection [${selectionStartColInLine}-${selectionEndColInLine}] is entirely within cell [${cellContentStartColInLine}-${cellContentEndColInLine}]. Result: ${isSelectionEntirelyWithinCell}`);
+    // Allow selection even if it starts at the very first char, but be ready to restore
 
-    if (!isSelectionEntirelyWithinCell) {
-      log(`${logPrefix} [selection] Selection is NOT entirely within cell ${targetCellIndex} or spans delimiters. Preventing default action to protect table structure.`);
+    if (isSelectionEntirelyWithinCell) {
+      log(`${logPrefix} [selection] Selection is entirely within cell ${targetCellIndex} or spans delimiters. Allowing default action.`);
       evt.preventDefault();
       return true;
     }
@@ -1375,6 +1382,13 @@ exports.aceKeyEvent = (h, ctx) => {
         log(`${logPrefix} [selection] -> Replacing selected range [[${rangeStart[0]},${rangeStart[1]}],[${rangeEnd[0]},${rangeEnd[1]}]] with text '${replacementText}'`);
       } else { // Delete or Backspace
         log(`${logPrefix} [selection] -> Deleting selected range [[${rangeStart[0]},${rangeStart[1]}],[${rangeEnd[0]},${rangeEnd[1]}]]`);
+        // If whole cell is being wiped, keep a single space so cell isn't empty
+        const isWholeCell = selectionStartColInLine <= cellContentStartColInLine && selectionEndColInLine >= cellContentEndColInLine;
+        if (isWholeCell) {
+          replacementText = ' ';
+          newAbsoluteCaretCol = selectionStartColInLine + 1;
+          log(`${logPrefix} [selection] Whole cell cleared – inserting single space to preserve caret/author span.`);
+        }
       }
 
       try {
@@ -1409,7 +1423,7 @@ exports.aceKeyEvent = (h, ctx) => {
         log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_performSelectionChange: Line=${repAfterSelectionChange.selStart[0]}, Col=${repAfterSelectionChange.selStart[1]}`);
         
         // Add sync hint AFTER setting selection
-        editorInfo.ace_fastIncorp(1);
+    editorInfo.ace_fastIncorp(1);
         const repAfterFastIncorp = editorInfo.ace_getRep();
         log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_fastIncorp: Line=${repAfterFastIncorp.selStart[0]}, Col=${repAfterFastIncorp.selStart[1]}`);
         log(`${logPrefix} [selection] -> Requested sync hint (fastIncorp 1).`);
@@ -1434,7 +1448,7 @@ exports.aceKeyEvent = (h, ctx) => {
         }
         
         log(`${logPrefix} END [selection] (Handled highlight modification) Key='${evt.key}' Type='${evt.type}'. Duration: ${Date.now() - startLogTime}ms`);
-        return true;
+      return true;
       } catch (error) {
         log(`${logPrefix} [selection] ERROR during highlight modification:`, error);
         console.error('[ep_tables5] Error processing highlight modification:', error);
@@ -1465,6 +1479,34 @@ exports.aceKeyEvent = (h, ctx) => {
   const isEnterKey = evt.key === 'Enter';
   log(`${logPrefix} Key classification: Typing=${isTypingKey}, Backspace=${isBackspaceKey}, Delete=${isDeleteKey}, Nav=${isNavigationKey}, Tab=${isTabKey}, Enter=${isEnterKey}, Cut=${isCutKey}`);
 
+  /*
+   * Prevent caret placement *after* the invisible caret-anchor.
+   * – RIGHT (→) pressed at the end of a cell jumps to the next cell.
+   * – LEFT  (←) pressed at the start of a cell jumps to the previous cell.
+   * This avoids the narrow dead-zone that lives between the anchor and the
+   * resize handle where typing previously caused content to drift into the
+   * neighbouring column.
+   */
+  const currentCellTextLengthEarly = cellTexts[targetCellIndex]?.length ?? 0;
+
+  if (evt.type === 'keydown' && !evt.ctrlKey && !evt.metaKey && !evt.altKey) {
+    // Right-arrow – if at the very end of a cell, move to the next cell.
+    if (evt.keyCode === 39 && relativeCaretPos >= currentCellTextLengthEarly && targetCellIndex < metadataForTargetLine.cols - 1) {
+      log(`${logPrefix} ArrowRight at cell boundary – navigating to next cell to avoid anchor zone.`);
+      evt.preventDefault();
+      navigateToNextCell(currentLineNum, targetCellIndex, metadataForTargetLine, false, editorInfo, docManager);
+      return true;
+    }
+
+    // Left-arrow – if at the very start of a cell, move to the previous cell.
+    if (evt.keyCode === 37 && relativeCaretPos === 0 && targetCellIndex > 0) {
+      log(`${logPrefix} ArrowLeft at cell boundary – navigating to previous cell to avoid anchor zone.`);
+      evt.preventDefault();
+      navigateToNextCell(currentLineNum, targetCellIndex, metadataForTargetLine, true, editorInfo, docManager);
+      return true;
+    }
+  }
+
   // --- Handle Keys --- 
 
   // 1. Allow non-Tab navigation keys immediately
@@ -1477,14 +1519,14 @@ exports.aceKeyEvent = (h, ctx) => {
   // 2. Handle Tab - Navigate to next cell (only on keydown to avoid double navigation)
   if (isTabKey) { 
      log(`${logPrefix} Tab key pressed. Event type: ${evt.type}`);
-     evt.preventDefault();
+    evt.preventDefault();
      
      // Only process keydown events for navigation to avoid double navigation
      if (evt.type !== 'keydown') {
        log(`${logPrefix} Ignoring Tab ${evt.type} event to prevent double navigation.`);
-       return true;
-     }
-     
+    return true;
+  }
+
      log(`${logPrefix} Processing Tab keydown - implementing cell navigation.`);
      const success = navigateToNextCell(currentLineNum, targetCellIndex, metadataForTargetLine, evt.shiftKey, editorInfo, docManager);
      if (!success) {
@@ -1496,14 +1538,14 @@ exports.aceKeyEvent = (h, ctx) => {
   // 3. Handle Enter - Navigate to cell below (only on keydown to avoid double navigation)
   if (isEnterKey) {
       log(`${logPrefix} Enter key pressed. Event type: ${evt.type}`);
-      evt.preventDefault();
+    evt.preventDefault();
       
       // Only process keydown events for navigation to avoid double navigation
       if (evt.type !== 'keydown') {
         log(`${logPrefix} Ignoring Enter ${evt.type} event to prevent double navigation.`);
-        return true;
-      }
-      
+    return true;
+  }
+
       log(`${logPrefix} Processing Enter keydown - implementing cell navigation.`);
       const success = navigateToCellBelow(currentLineNum, targetCellIndex, metadataForTargetLine, editorInfo, docManager);
       if (!success) {
@@ -1517,8 +1559,14 @@ exports.aceKeyEvent = (h, ctx) => {
   // Backspace at the very beginning of cell > 0
       if (isBackspaceKey && relativeCaretPos === 0 && targetCellIndex > 0) {
       log(`${logPrefix} Intercepted Backspace at start of cell ${targetCellIndex}. Preventing default.`);
-          evt.preventDefault();
+    evt.preventDefault();
           return true;
+      }
+  // NEW: Backspace at very beginning of first cell – would merge with previous line
+      if (isBackspaceKey && relativeCaretPos === 0 && targetCellIndex === 0) {
+        log(`${logPrefix} Intercepted Backspace at start of first cell (line boundary). Preventing merge.`);
+        evt.preventDefault();
+        return true;
       }
   // Delete at the very end of cell < last cell
   if (isDeleteKey && relativeCaretPos === currentCellTextLength && targetCellIndex < metadataForTargetLine.cols - 1) {
@@ -1526,12 +1574,35 @@ exports.aceKeyEvent = (h, ctx) => {
           evt.preventDefault();
           return true;
       }
+  // NEW: Delete at very end of last cell – would merge with next line
+      if (isDeleteKey && relativeCaretPos === currentCellTextLength && targetCellIndex === metadataForTargetLine.cols - 1) {
+        log(`${logPrefix} Intercepted Delete at end of last cell (line boundary). Preventing merge.`);
+        evt.preventDefault();
+        return true;
+      }
 
   // 5. Handle Typing/Backspace/Delete WITHIN a cell via manual modification
   const isInternalBackspace = isBackspaceKey && relativeCaretPos > 0;
   const isInternalDelete = isDeleteKey && relativeCaretPos < currentCellTextLength;
 
+  // Guard: internal Backspace at relativePos 1 (would delete delimiter) & Delete at relativePos 0
+  if ((isInternalBackspace && relativeCaretPos === 1 && targetCellIndex > 0) ||
+      (isInternalDelete && relativeCaretPos === 0 && targetCellIndex > 0)) {
+    log(`${logPrefix} Attempt to erase protected delimiter – operation blocked.`);
+    evt.preventDefault();
+    return true;
+  }
+
   if (isTypingKey || isInternalBackspace || isInternalDelete) {
+    // --- PREVENT TYPING DIRECTLY AFTER DELIMITER (relativeCaretPos===0) ---
+    if (isTypingKey && relativeCaretPos === 0 && targetCellIndex > 0) {
+      log(`${logPrefix} Caret at forbidden position 0 (just after delimiter). Auto-advancing to position 1.`);
+      const safePosAbs = cellStartCol + 1;
+      editorInfo.ace_performSelectionChange([currentLineNum, safePosAbs], [currentLineNum, safePosAbs], false);
+      editorInfo.ace_updateBrowserSelectionFromRep();
+      relativeCaretPos = 1;
+      log(`${logPrefix} Caret moved to safe position. New relativeCaretPos=${relativeCaretPos}`);
+    }
     // *** Use the validated currentLineNum and currentCol derived from relativeCaretPos ***
     const currentCol = cellStartCol + relativeCaretPos;
     log(`${logPrefix} Handling INTERNAL key='${evt.key}' Type='${evt.type}' at Line=${currentLineNum}, Col=${currentCol} (CellIndex=${targetCellIndex}, RelativePos=${relativeCaretPos}).`);
@@ -1654,9 +1725,9 @@ exports.aceKeyEvent = (h, ctx) => {
             console.error('[ep_tables5] Error processing key event update:', error);
         // Maybe return false to allow default as a fallback on error?
         // For now, return true as we prevented default.
-        return true;
-    }
-       
+    return true;
+  }
+
     const endLogTime = Date.now();
     log(`${logPrefix} END (Handled Internal Edit Manually) Key='${evt.key}' Type='${evt.type}' -> Returned true. Duration: ${endLogTime - startLogTime}ms`);
     return true; // We handled the key event
@@ -1781,29 +1852,27 @@ exports.aceInitialized = (h, ctx) => {
       }
 
       log(`${cutLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
-      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
-      if (!lineAttrString) {
-        log(`${cutLogPrefix} Line ${lineNum} is NOT a table line (no '${ATTR_TABLE_JSON}' attribute found). Allowing default cut.`);
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+
+      if (lineAttrString) {
+        // Fast-path: attribute exists – parse it.
+        try {
+        tableMetadata = JSON.parse(lineAttrString);
+        } catch {}
+      }
+
+      if (!tableMetadata) {
+        // Fallback for block-styled rows – reconstruct via DOM helper.
+        tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      }
+
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+        log(`${cutLogPrefix} Line ${lineNum} is NOT a recognised table line. Allowing default cut.`);
         return; // Not a table line
       }
-      log(`${cutLogPrefix} Line ${lineNum} IS a table line. Attribute string: "${lineAttrString}".`);
 
-      let tableMetadata;
-      try {
-        log(`${cutLogPrefix} Parsing table metadata from attribute string.`);
-        tableMetadata = JSON.parse(lineAttrString);
-        log(`${cutLogPrefix} Parsed table metadata:`, tableMetadata);
-        if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
-          log(`${cutLogPrefix} WARNING: Invalid or incomplete table metadata on line ${lineNum}. Allowing default cut. Metadata:`, tableMetadata);
-          console.warn(`${cutLogPrefix} Invalid table metadata for line ${lineNum}.`);
-          return; // Allow default
-        }
-        log(`${cutLogPrefix} Table metadata validated successfully: tblId=${tableMetadata.tblId}, row=${tableMetadata.row}, cols=${tableMetadata.cols}.`);
-      } catch(e) {
-        console.error(`${cutLogPrefix} ERROR parsing table metadata for line ${lineNum}:`, e);
-        log(`${cutLogPrefix} Metadata parse error. Allowing default cut. Error details:`, { message: e.message, stack: e.stack });
-        return; // Allow default
-      }
+      log(`${cutLogPrefix} Line ${lineNum} IS a table line. Metadata:`, tableMetadata);
 
       // Validate selection is within cell boundaries
       const lineText = rep.lines.atIndex(lineNum)?.text || '';
@@ -1926,19 +1995,20 @@ exports.aceInitialized = (h, ctx) => {
 
       // Check if we're dropping onto a table line
       log(`${dropLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
-      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
-      if (!lineAttrString) {
-        log(`${dropLogPrefix} Line ${lineNum} is NOT a table line (no '${ATTR_TABLE_JSON}' attribute found). Allowing default drop.`);
-        return; // Not a table line
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let isTableLine = !!lineAttrString;
+
+      if (!isTableLine) {
+        const metadataFallback = getTableLineMetadata(lineNum, ed, docManager);
+        isTableLine = !!metadataFallback;
       }
 
+      if (isTableLine) {
       log(`${dropLogPrefix} Line ${lineNum} IS a table line. Preventing drop to protect table structure.`);
       evt.preventDefault();
       evt.stopPropagation();
-      
-      // Show user feedback that drop was prevented
       console.warn('[ep_tables5] Drop operation prevented to protect table structure. Please use copy/paste within table cells.');
-      log(`${dropLogPrefix} Drop operation prevented to protect table structure.`);
+      }
     });
 
     // Also prevent dragover to ensure drop events are properly handled
@@ -1954,10 +2024,17 @@ exports.aceInitialized = (h, ctx) => {
       const lineNum = selStart[0];
 
       // Check if we're dragging over a table line
-      const lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
-      if (lineAttrString) {
+      log(`${dragLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let isTableLine = !!lineAttrString;
+
+      if (!isTableLine) {
+        isTableLine = !!getTableLineMetadata(lineNum, ed, docManager);
+      }
+
+      if (isTableLine) {
         log(`${dragLogPrefix} Preventing dragover on table line ${lineNum} to control drop handling.`);
-        evt.preventDefault(); // Necessary to enable drop event handling
+        evt.preventDefault();
       }
     });
 
@@ -2047,6 +2124,13 @@ exports.aceInitialized = (h, ctx) => {
       }
       log(`${pasteLogPrefix} Clipboard data object obtained:`, clipboardData);
 
+      // Allow default handling (so ep_hyperlinked_text plugin can process) if rich HTML is present
+      const types = clipboardData.types || [];
+      if (types.includes('text/html') && clipboardData.getData('text/html')) {
+        log(`${pasteLogPrefix} Detected text/html in clipboard – deferring to other plugins and default paste.`);
+        return; // Do not intercept
+      }
+
       log(`${pasteLogPrefix} Getting 'text/plain' from clipboard.`);
       const pastedTextRaw = clipboardData.getData('text/plain');
       log(`${pasteLogPrefix} Pasted text raw: "${pastedTextRaw}" (Type: ${typeof pastedTextRaw})`);
@@ -2077,8 +2161,12 @@ exports.aceInitialized = (h, ctx) => {
       const selectionLength = selEnd[1] - selStart[1];
       const newCellLength = currentCellText.length - selectionLength + pastedText.length;
       
-      // Optional: Add a reasonable maximum cell length if desired
-      const MAX_CELL_LENGTH = 1000; // Example maximum
+      // Soft safety-valve: Etherpad can technically handle very long lines but
+      // extremely large cells slow down rendering.  8 000 chars ≈ five classic
+      // 'Lorem Ipsum' paragraphs and feels like a reasonable upper bound while
+      // still letting users paste substantive text.  Increase/decrease as you
+      // see fit or set to `Infinity` to remove the cap entirely.
+      const MAX_CELL_LENGTH = 8000;
       if (newCellLength > MAX_CELL_LENGTH) {
         log(`${pasteLogPrefix} WARNING: Paste would exceed maximum cell length (${newCellLength} > ${MAX_CELL_LENGTH}). Truncating paste.`);
         const truncatedPaste = pastedText.substring(0, MAX_CELL_LENGTH - (currentCellText.length - selectionLength));
@@ -2093,6 +2181,10 @@ exports.aceInitialized = (h, ctx) => {
 
       log(`${pasteLogPrefix} INTERCEPTING paste of plain text into table line ${lineNum}. PREVENTING DEFAULT browser action.`);
       evt.preventDefault();
+      // Prevent other plugins from handling the same paste event once we
+      // have intercepted it inside a table cell.
+      evt.stopPropagation();
+      if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
 
       try {
         log(`${pasteLogPrefix} Preparing to perform paste operations via ed.ace_callWithAce.`);
@@ -2540,6 +2632,31 @@ exports.aceInitialized = (h, ctx) => {
     for (let r = 0; r < rows; r++) {
       const lineNumToApply = initialStartLine + r;
       log(`${funcName}: -> Processing row ${r} on line ${lineNumToApply}`);
+
+      const lineEntry = currentRep.lines.atIndex(lineNumToApply);
+      if (!lineEntry) {
+        log(`${funcName}: Could not find line entry for ${lineNumToApply}, skipping attribute application.`);
+        continue;
+      }
+      const lineText = lineEntry.text || '';
+      const cells = lineText.split(DELIMITER);
+      let offset = 0;
+
+      // Apply cell-specific attributes to trigger authorship span splitting
+      for (let c = 0; c < cols; c++) {
+        const cellContent = (c < cells.length) ? cells[c] || '' : '';
+        if (cellContent.length > 0) { // Only apply to non-empty cells
+          const cellStart = [lineNumToApply, offset];
+          const cellEnd = [lineNumToApply, offset + cellContent.length];
+          log(`${funcName}: Applying ${ATTR_CELL} attribute to Line ${lineNumToApply} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+          ed.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+        }
+        offset += cellContent.length;
+        if (c < cols - 1) {
+          offset += DELIMITER.length;
+        }
+      }
+
       // Call the module-level helper, passing necessary context (currentRep, ed)
       // Note: documentAttributeManager not available in this context for new table creation
       applyTableLineMetadataAttribute(lineNumToApply, tblId, r, cols, currentRep, ed, null, null); 
@@ -2768,6 +2885,23 @@ exports.aceInitialized = (h, ctx) => {
       // Insert new line in text
       editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
       
+      // Apply cell-specific attributes to the new row for authorship
+      const rep = editorInfo.ace_getRep();
+      const cells = newLineText.split(DELIMITER);
+      let offset = 0;
+      for (let c = 0; c < numCols; c++) {
+        const cellContent = (c < cells.length) ? cells[c] || '' : '';
+        if (cellContent.length > 0) {
+          const cellStart = [insertLineIndex, offset];
+          const cellEnd = [insertLineIndex, offset + cellContent.length];
+          editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+        }
+        offset += cellContent.length;
+        if (c < numCols - 1) {
+          offset += DELIMITER.length;
+        }
+      }
+      
       // Preserve column widths from existing metadata or extract from DOM
       let columnWidths = targetLine.metadata.columnWidths;
       if (!columnWidths) {
@@ -2829,6 +2963,23 @@ exports.aceInitialized = (h, ctx) => {
       // Insert new line in text
       editorInfo.ace_performDocumentReplaceRange([insertLineIndex, 0], [insertLineIndex, 0], newLineText + '\n');
       
+      // Apply cell-specific attributes to the new row for authorship
+      const rep = editorInfo.ace_getRep();
+      const cells = newLineText.split(DELIMITER);
+      let offset = 0;
+      for (let c = 0; c < numCols; c++) {
+        const cellContent = (c < cells.length) ? cells[c] || '' : '';
+        if (cellContent.length > 0) {
+          const cellStart = [insertLineIndex, offset];
+          const cellEnd = [insertLineIndex, offset + cellContent.length];
+          editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+        }
+        offset += cellContent.length;
+        if (c < numCols - 1) {
+          offset += DELIMITER.length;
+        }
+      }
+      
       // Preserve column widths from existing metadata or extract from DOM
       let columnWidths = targetLine.metadata.columnWidths;
       if (!columnWidths) {
@@ -2882,24 +3033,49 @@ exports.aceInitialized = (h, ctx) => {
   }
   
   function addTableColumnLeftWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    const funcName = 'addTableColumnLeftWithText';
     try {
-      // Update text content for all table lines using precise character insertion
+      // Process each line individually like table creation does
       for (const tableLine of tableLines) {
         const lineText = tableLine.lineText;
         const cells = lineText.split(DELIMITER);
         
-        // Calculate the exact insertion position
+        // Calculate the exact insertion position - stop BEFORE the target column's delimiter
         let insertPos = 0;
         for (let i = 0; i < targetColIndex; i++) {
           insertPos += (cells[i]?.length ?? 0) + DELIMITER.length;
         }
         
-        // Insert empty cell with delimiter at the calculated position
-        const textToInsert = (targetColIndex === 0) ? ' ' + DELIMITER : DELIMITER + ' ';
+        // Insert blank cell then delimiter (BLANK + separator)
+        const textToInsert = ' ' + DELIMITER;
         const insertStart = [tableLine.lineIndex, insertPos];
         const insertEnd = [tableLine.lineIndex, insertPos];
         
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
+        
+        // Immediately apply authorship attributes like table creation does
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        if (lineEntry) {
+          const newLineText = lineEntry.text || '';
+          const newCells = newLineText.split(DELIMITER);
+          let offset = 0;
+          
+          // Apply cell-specific attributes to ALL cells (like table creation)
+          for (let c = 0; c < tableLine.cols + 1; c++) { // +1 for the new column
+            const cellContent = (c < newCells.length) ? newCells[c] || '' : '';
+            if (cellContent.length > 0) { // Only apply to non-empty cells
+              const cellStart = [tableLine.lineIndex, offset];
+              const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
+              console.log(`[ep_tables5] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+            }
+            offset += cellContent.length;
+            if (c < newCells.length - 1) {
+              offset += DELIMITER.length;
+            }
+          }
+        }
         
         // Update column widths - add new column with equal width distribution
         let oldColumnWidths = tableLine.metadata.columnWidths;
@@ -2945,11 +3121,12 @@ exports.aceInitialized = (h, ctx) => {
         const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
         const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
         
-        // Update metadata
+        // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
         applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
+      // Final sync
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
@@ -2959,25 +3136,50 @@ exports.aceInitialized = (h, ctx) => {
   }
   
   function addTableColumnRightWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    const funcName = 'addTableColumnRightWithText';
     try {
-      // Update text content for all table lines using precise character insertion
+      // Process each line individually like table creation does
       for (const tableLine of tableLines) {
         const lineText = tableLine.lineText;
         const cells = lineText.split(DELIMITER);
         
-        // Calculate the exact insertion position (after the target column)
+        // Calculate the exact insertion position - stop BEFORE the target column's trailing delimiter
         let insertPos = 0;
         for (let i = 0; i <= targetColIndex; i++) {
           insertPos += (cells[i]?.length ?? 0);
-          if (i < cells.length - 1) insertPos += DELIMITER.length;
+          if (i < targetColIndex) insertPos += DELIMITER.length;
         }
         
-        // Insert delimiter and empty cell at the calculated position
+        // Insert delimiter then blank cell (separator + BLANK)
         const textToInsert = DELIMITER + ' ';
         const insertStart = [tableLine.lineIndex, insertPos];
         const insertEnd = [tableLine.lineIndex, insertPos];
         
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
+        
+        // Immediately apply authorship attributes like table creation does
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        if (lineEntry) {
+          const newLineText = lineEntry.text || '';
+          const newCells = newLineText.split(DELIMITER);
+          let offset = 0;
+          
+          // Apply cell-specific attributes to ALL cells (like table creation)
+          for (let c = 0; c < tableLine.cols + 1; c++) { // +1 for the new column
+            const cellContent = (c < newCells.length) ? newCells[c] || '' : '';
+            if (cellContent.length > 0) { // Only apply to non-empty cells
+              const cellStart = [tableLine.lineIndex, offset];
+              const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
+              console.log(`[ep_tables5] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+            }
+            offset += cellContent.length;
+            if (c < newCells.length - 1) {
+              offset += DELIMITER.length;
+            }
+          }
+        }
         
         // Update column widths - add new column with equal width distribution
         let oldColumnWidths = tableLine.metadata.columnWidths;
@@ -3023,11 +3225,12 @@ exports.aceInitialized = (h, ctx) => {
         const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
         const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
         
-        // Update metadata
+        // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
         applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
       
+      // Final sync
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
@@ -3903,6 +4106,17 @@ exports.postAceInit = (hookName, ctx) => {
                            const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
                            editor.ep_tables5_last_clicked = clickInfo;
                            log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
+
+                           // --- NEW: Jump caret immediately for snappier UX ---
+                           try {
+                             const docMgr = ace.ep_tables5_docManager;
+                             if (docMgr && typeof navigateToCell === 'function') {
+                               const navOk = navigateToCell(lineNum, cellIndex, ace, docMgr);
+                               log(`${mousedownFuncName} Immediate navigateToCell result: ${navOk}`);
+                             }
+                           } catch (navErr) {
+                             console.error(`${mousedownFuncName} Error during immediate caret navigation:`, navErr);
+                           }
 
                            // TODO: Add visual class for selection if desired
                            log(`${mousedownFuncName} TEST: Skipped adding/removing selected-table-cell class`);
