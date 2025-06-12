@@ -17,8 +17,8 @@ const ATTR_TABLE_JSON = 'tbljson';
 const ATTR_CELL       = 'td';
 const ATTR_CLASS_PREFIX = 'tbljson-'; // For finding the class in DOM
 const log             = (...m) => console.debug('[ep_tables5:client_hooks]', ...m);
-const DELIMITER       = '|'; // SIMPLIFIED DELIMITER
-const HIDDEN_DELIM    = '|';        // Keep the real char for DOM alignment
+const DELIMITER       = '\u241F';   // Internal column delimiter (␟)
+const HIDDEN_DELIM    = '|';        // What users see between cells
 
 // helper for stable random ids
 const rand = () => Math.random().toString(36).slice(2, 8);
@@ -689,7 +689,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     const resizeHandle = !isLastColumn ? 
       `<div class="ep-tables5-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
 
-    const tdContent = `<td style="${cellStyle}" data-column="${index}">${modifiedSegment}${resizeHandle}</td>`;
+    const tdContent = `<td style="${cellStyle}" data-column="${index}" draggable="false">${modifiedSegment}${resizeHandle}</td>`;
     return tdContent;
   }).join('');
   log(`${funcName}: Joined all cellsHtml:`, cellsHtml);
@@ -700,7 +700,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
 
   // Construct the final table HTML
   // Rely on CSS for border-collapse, width etc. Add data attributes from metadata.
-  const tableHtml = `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
+  const tableHtml = `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
   log(`${funcName}: Generated final table HTML:`, tableHtml);
   log(`${funcName}: END - Success`);
   return tableHtml;
@@ -1349,9 +1349,20 @@ exports.aceKeyEvent = (h, ctx) => {
     // Allow selection even if it starts at the very first char, but be ready to restore
 
     if (isSelectionEntirelyWithinCell) {
-      log(`${logPrefix} [selection] Selection is entirely within cell ${targetCellIndex} or spans delimiters. Allowing default action.`);
-      evt.preventDefault();
-      return true;
+      // Pure selection (no key pressed yet) – allow browser shortcuts such as
+      // Ctrl-C / Ctrl-X / Cmd-C / Cmd-X to work.  We only take control for
+      // real keydown events that would modify the cell (handled further below).
+
+      // 1. Non-keydown events → let them bubble (copy/cut command happens on
+      //    the subsequent "copy"/"cut" event).
+      if (evt.type !== 'keydown') return false;
+
+      // 2. Keydown that involves modifiers (Ctrl/Cmd/Alt) → we are not going
+      //    to change the cell text, so let the browser handle it.
+      if (evt.ctrlKey || evt.metaKey || evt.altKey) return false;
+
+      // 3. For destructive or printable keys we fall through so the specialised
+      //    highlight-deletion logic that follows can run.
     }
 
     const isCurrentKeyDelete = evt.key === 'Delete' || evt.keyCode === 46;
@@ -1943,6 +1954,18 @@ exports.aceInitialized = (h, ctx) => {
           aceInstance.ace_performDocumentReplaceRange(selStart, selEnd, '');
           log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
 
+          // --- Ensure cell is not left empty (zero-length) ---
+          const repAfterDeletion = aceInstance.ace_getRep();
+          const lineTextAfterDeletion = repAfterDeletion.lines.atIndex(lineNum).text;
+          const cellsAfterDeletion = lineTextAfterDeletion.split(DELIMITER);
+          const cellTextAfterDeletion = cellsAfterDeletion[targetCellIndex] || '';
+
+          if (cellTextAfterDeletion.length === 0) {
+            log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after cut – inserting single space to preserve structure.`);
+            const insertPos = [lineNum, selStart[1]]; // Start of the now-empty cell
+            aceInstance.ace_performDocumentReplaceRange(insertPos, insertPos, ' ');
+          }
+
           log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
           const repAfterCut = aceInstance.ace_getRep();
           log(`${callAceLogPrefix} Fetched rep after cut for applyMeta. Line ${lineNum} text now: "${repAfterCut.lines.atIndex(lineNum).text}"`);
@@ -1971,6 +1994,154 @@ exports.aceInitialized = (h, ctx) => {
       } catch (error) {
         console.error(`${cutLogPrefix} ERROR during cut operation:`, error);
         log(`${cutLogPrefix} Cut operation failed. Error details:`, { message: error.message, stack: error.stack });
+      }
+    });
+
+    // *** BEFOREINPUT EVENT LISTENER FOR CONTEXT-MENU DELETE ***
+    log(`${callWithAceLogPrefix} Attaching beforeinput event listener to $inner (inner iframe body).`);
+    $inner.on('beforeinput', (evt) => {
+      const deleteLogPrefix = '[ep_tables5:beforeinputDeleteHandler]';
+      log(`${deleteLogPrefix} BEFOREINPUT EVENT TRIGGERED. inputType: "${evt.originalEvent.inputType}", event object:`, evt);
+
+      // Only intercept deletion-related input events
+      if (!evt.originalEvent.inputType || !evt.originalEvent.inputType.startsWith('delete')) {
+        log(`${deleteLogPrefix} Not a deletion event (inputType: "${evt.originalEvent.inputType}"). Allowing default.`);
+        return; // Allow default for non-delete events
+      }
+
+      log(`${deleteLogPrefix} Getting current editor representation (rep).`);
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) {
+        log(`${deleteLogPrefix} WARNING: Could not get representation or selection. Allowing default delete.`);
+        console.warn(`${deleteLogPrefix} Could not get rep or selStart.`);
+        return; // Allow default
+      }
+      log(`${deleteLogPrefix} Rep obtained. selStart:`, rep.selStart, `selEnd:`, rep.selEnd);
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+      log(`${deleteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
+
+      // Check if there's actually a selection to delete
+      if (selStart[0] === selEnd[0] && selStart[1] === selEnd[1]) {
+        log(`${deleteLogPrefix} No selection to delete. Allowing default delete.`);
+        return; // Allow default - nothing to delete
+      }
+
+      // Check if selection spans multiple lines
+      if (selStart[0] !== selEnd[0]) {
+        log(`${deleteLogPrefix} WARNING: Selection spans multiple lines. Preventing delete to protect table structure.`);
+        evt.preventDefault();
+        return;
+      }
+
+      log(`${deleteLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+
+      if (lineAttrString) {
+        // Fast-path: attribute exists – parse it.
+        try {
+          tableMetadata = JSON.parse(lineAttrString);
+        } catch {}
+      }
+
+      if (!tableMetadata) {
+        // Fallback for block-styled rows – reconstruct via DOM helper.
+        tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      }
+
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+        log(`${deleteLogPrefix} Line ${lineNum} is NOT a recognised table line. Allowing default delete.`);
+        return; // Not a table line
+      }
+
+      log(`${deleteLogPrefix} Line ${lineNum} IS a table line. Metadata:`, tableMetadata);
+
+      // Validate selection is within cell boundaries
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+
+      for (let i = 0; i < cells.length; i++) {
+        const cellLength = cells[i]?.length ?? 0;
+        const cellEndColThisIteration = currentOffset + cellLength;
+        
+        if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = cellEndColThisIteration;
+          break;
+        }
+        currentOffset += cellLength + DELIMITER.length;
+      }
+
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
+        log(`${deleteLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing delete to protect table structure.`);
+        evt.preventDefault();
+        return;
+      }
+
+      // If we reach here, the selection is entirely within a single cell - intercept delete and preserve table structure
+      log(`${deleteLogPrefix} Selection is entirely within cell ${targetCellIndex}. Intercepting delete to preserve table structure.`);
+      evt.preventDefault();
+
+      try {
+        // No clipboard operations needed for delete - just perform the deletion within the cell using ace operations
+        log(`${deleteLogPrefix} Performing deletion via ed.ace_callWithAce.`);
+        ed.ace_callWithAce((aceInstance) => {
+          const callAceLogPrefix = `${deleteLogPrefix}[ace_callWithAceOps]`;
+          log(`${callAceLogPrefix} Entered ace_callWithAce for delete operations. selStart:`, selStart, `selEnd:`, selEnd);
+          
+          log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to delete selected text.`);
+          aceInstance.ace_performDocumentReplaceRange(selStart, selEnd, '');
+          log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
+
+          // --- Ensure cell is not left empty (zero-length) ---
+          const repAfterDeletion = aceInstance.ace_getRep();
+          const lineTextAfterDeletion = repAfterDeletion.lines.atIndex(lineNum).text;
+          const cellsAfterDeletion = lineTextAfterDeletion.split(DELIMITER);
+          const cellTextAfterDeletion = cellsAfterDeletion[targetCellIndex] || '';
+
+          if (cellTextAfterDeletion.length === 0) {
+            log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after delete – inserting single space to preserve structure.`);
+            const insertPos = [lineNum, selStart[1]]; // Start of the now-empty cell
+            aceInstance.ace_performDocumentReplaceRange(insertPos, insertPos, ' ');
+          }
+
+          log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
+          const repAfterDelete = aceInstance.ace_getRep();
+          log(`${callAceLogPrefix} Fetched rep after delete for applyMeta. Line ${lineNum} text now: "${repAfterDelete.lines.atIndex(lineNum).text}"`);
+          
+          ed.ep_tables5_applyMeta(
+            lineNum,
+            tableMetadata.tblId,
+            tableMetadata.row,
+            tableMetadata.cols,
+            repAfterDelete,
+            ed,
+            null,
+            docManager
+          );
+          log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+
+          // Determine new caret position – one char forward if we inserted a space
+          const newCaretAbsoluteCol = (cellTextAfterDeletion.length === 0) ? selStart[1] + 1 : selStart[1];
+          const newCaretPos = [lineNum, newCaretAbsoluteCol];
+          log(`${callAceLogPrefix} Setting caret position to: [${newCaretPos}].`);
+          aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+          log(`${callAceLogPrefix} Selection change successful.`);
+
+          log(`${callAceLogPrefix} Delete operations within ace_callWithAce completed successfully.`);
+        }, 'tableDeleteTextOperations', true);
+
+        log(`${deleteLogPrefix} Delete operation completed successfully.`);
+      } catch (error) {
+        console.error(`${deleteLogPrefix} ERROR during delete operation:`, error);
+        log(`${deleteLogPrefix} Delete operation failed. Error details:`, { message: error.message, stack: error.stack });
       }
     });
 
@@ -2138,7 +2309,7 @@ exports.aceInitialized = (h, ctx) => {
       // ENHANCED: More thorough sanitization of pasted content
       let pastedText = pastedTextRaw
         .replace(/(\r\n|\n|\r)/gm, " ") // Replace newlines with space
-        .replace(/\|/g, " ") // Replace pipe characters with space to prevent delimiter injection
+        .replace(new RegExp(DELIMITER, 'g'), ' ') // Strip our internal delimiter
         .replace(/\t/g, " ") // Replace tabs with space
         .replace(/\s+/g, " ") // Normalize whitespace
         .trim(); // Trim leading/trailing whitespace
@@ -2469,6 +2640,27 @@ exports.aceInitialized = (h, ctx) => {
       document.addEventListener('mousedown', failsafeMouseup, true);
       document.addEventListener('click', failsafeMouseup, true);
       log(`${callWithAceLogPrefix} Attached failsafe event handlers`);
+      
+      // *** DRAG PREVENTION FOR TABLE ELEMENTS ***
+      const preventTableDrag = (evt) => {
+        const target = evt.target;
+        // Check if the target is a table element or inside a table
+        if (target.tagName === 'TABLE' && target.classList.contains('dataTable') ||
+            target.tagName === 'TD' && target.closest('table.dataTable') ||
+            target.tagName === 'TR' && target.closest('table.dataTable') ||
+            target.tagName === 'TBODY' && target.closest('table.dataTable')) {
+          log('[ep_tables5:dragPrevention] Preventing drag operation on table element:', target.tagName);
+          evt.preventDefault();
+          evt.stopPropagation();
+          return false;
+        }
+      };
+      
+      // Add drag event listeners to prevent table dragging
+      $inner.on('dragstart', preventTableDrag);
+      $inner.on('drag', preventTableDrag);
+      $inner.on('dragend', preventTableDrag);
+      log(`${callWithAceLogPrefix} Attached drag prevention handlers to inner body`);
     };
     
     // Setup the global handlers
@@ -2847,11 +3039,23 @@ exports.aceInitialized = (h, ctx) => {
           break;
           
         case 'delTblRow': // Delete row
+          // Show confirmation prompt for row deletion
+          const rowConfirmMessage = `Are you sure you want to delete Row ${targetRowIndex + 1} and all content within?`;
+          if (!confirm(rowConfirmMessage)) {
+            log(`${funcName}: Row deletion cancelled by user`);
+            return;
+          }
           log(`${funcName}: Deleting row ${targetRowIndex}`);
           success = deleteTableRowWithText(tableLines, targetRowIndex, ed, docManager);
           break;
           
         case 'delTblCol': // Delete column
+          // Show confirmation prompt for column deletion
+          const colConfirmMessage = `Are you sure you want to delete Column ${targetColIndex + 1} and all content within?`;
+          if (!confirm(colConfirmMessage)) {
+            log(`${funcName}: Column deletion cancelled by user`);
+            return;
+          }
           log(`${funcName}: Deleting column ${targetColIndex}`);
           newNumCols = numCols - 1;
           success = deleteTableColumnWithText(tableLines, targetColIndex, ed, docManager);
@@ -3077,49 +3281,12 @@ exports.aceInitialized = (h, ctx) => {
           }
         }
         
-        // Update column widths - add new column with equal width distribution
-        let oldColumnWidths = tableLine.metadata.columnWidths;
-        if (!oldColumnWidths) {
-          // Extract from DOM for block-styled rows
-          try {
-            const rep = editorInfo.ace_getRep();
-            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
-            if (lineEntry && lineEntry.lineNode) {
-              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
-              if (tableInDOM) {
-                const domCells = tableInDOM.querySelectorAll('td');
-                if (domCells.length === tableLine.cols) {
-                  oldColumnWidths = [];
-                  domCells.forEach(cell => {
-                    const style = cell.getAttribute('style') || '';
-                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
-                    if (widthMatch) {
-                      oldColumnWidths.push(parseFloat(widthMatch[1]));
-                    } else {
-                      oldColumnWidths.push(100 / tableLine.cols);
-                    }
-                  });
-                  console.log('[ep_tables5] addTableColumnLeft: Extracted column widths from DOM:', oldColumnWidths);
-                }
-              }
-            }
-          } catch (e) {
-            console.error('[ep_tables5] addTableColumnLeft: Error extracting column widths from DOM:', e);
-          }
-        }
-        
-        // Fallback to equal distribution if still not found
-        if (!oldColumnWidths) {
-          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
-        }
-        
-        const averageWidth = 100 / (tableLine.cols + 1);
-        const newColumnWidths = [...oldColumnWidths];
-        newColumnWidths.splice(targetColIndex, 0, averageWidth);
-        
-        // Normalize all widths to sum to 100%
-        const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
-        const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
+        // Reset all column widths to equal distribution when adding a column
+        // This avoids complex width calculations and ensures robust behavior
+        const newColCount = tableLine.cols + 1;
+        const equalWidth = 100 / newColCount;
+        const normalizedWidths = Array(newColCount).fill(equalWidth);
+        console.log(`[ep_tables5] addTableColumnLeft: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
         
         // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
@@ -3181,49 +3348,12 @@ exports.aceInitialized = (h, ctx) => {
           }
         }
         
-        // Update column widths - add new column with equal width distribution
-        let oldColumnWidths = tableLine.metadata.columnWidths;
-        if (!oldColumnWidths) {
-          // Extract from DOM for block-styled rows
-          try {
-            const rep = editorInfo.ace_getRep();
-            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
-            if (lineEntry && lineEntry.lineNode) {
-              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
-              if (tableInDOM) {
-                const domCells = tableInDOM.querySelectorAll('td');
-                if (domCells.length === tableLine.cols) {
-                  oldColumnWidths = [];
-                  domCells.forEach(cell => {
-                    const style = cell.getAttribute('style') || '';
-                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
-                    if (widthMatch) {
-                      oldColumnWidths.push(parseFloat(widthMatch[1]));
-                    } else {
-                      oldColumnWidths.push(100 / tableLine.cols);
-                    }
-                  });
-                  console.log('[ep_tables5] addTableColumnRight: Extracted column widths from DOM:', oldColumnWidths);
-                }
-              }
-            }
-          } catch (e) {
-            console.error('[ep_tables5] addTableColumnRight: Error extracting column widths from DOM:', e);
-          }
-        }
-        
-        // Fallback to equal distribution if still not found
-        if (!oldColumnWidths) {
-          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
-        }
-        
-        const averageWidth = 100 / (tableLine.cols + 1);
-        const newColumnWidths = [...oldColumnWidths];
-        newColumnWidths.splice(targetColIndex + 1, 0, averageWidth);
-        
-        // Normalize all widths to sum to 100%
-        const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
-        const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
+        // Reset all column widths to equal distribution when adding a column
+        // This avoids complex width calculations and ensures robust behavior
+        const newColCount = tableLine.cols + 1;
+        const equalWidth = 100 / newColCount;
+        const normalizedWidths = Array(newColCount).fill(equalWidth);
+        console.log(`[ep_tables5] addTableColumnRight: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
         
         // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
@@ -3243,10 +3373,23 @@ exports.aceInitialized = (h, ctx) => {
     try {
       const targetLine = tableLines[targetRowIndex];
       
-      // Delete the entire line
-      const deleteStart = [targetLine.lineIndex, 0];
-      const deleteEnd = [targetLine.lineIndex + 1, 0];
-      editorInfo.ace_performDocumentReplaceRange(deleteStart, deleteEnd, '');
+      // Special handling for deleting the first row (row index 0)
+      // Insert a blank line to prevent the table from getting stuck at line 1
+      if (targetRowIndex === 0) {
+        log('[ep_tables5] Deleting first row (row 0) - inserting blank line to prevent table from getting stuck');
+        const insertStart = [targetLine.lineIndex, 0];
+        editorInfo.ace_performDocumentReplaceRange(insertStart, insertStart, '\n');
+        
+        // Now delete the table line (which is now at lineIndex + 1)
+        const deleteStart = [targetLine.lineIndex + 1, 0];
+        const deleteEnd = [targetLine.lineIndex + 2, 0];
+        editorInfo.ace_performDocumentReplaceRange(deleteStart, deleteEnd, '');
+      } else {
+        // Delete the entire line normally
+        const deleteStart = [targetLine.lineIndex, 0];
+        const deleteEnd = [targetLine.lineIndex + 1, 0];
+        editorInfo.ace_performDocumentReplaceRange(deleteStart, deleteEnd, '');
+      }
       
       // Extract column widths from target line before deletion for preserving in remaining rows
       let columnWidths = targetLine.metadata.columnWidths;
@@ -3343,53 +3486,17 @@ exports.aceInitialized = (h, ctx) => {
         
         editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, '');
         
-        // Update column widths - remove the target column and redistribute
-        let oldColumnWidths = tableLine.metadata.columnWidths;
-        if (!oldColumnWidths) {
-          // Extract from DOM for block-styled rows
-          try {
-            const rep = editorInfo.ace_getRep();
-            const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
-            if (lineEntry && lineEntry.lineNode) {
-              const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tableLine.metadata.tblId}"]`);
-              if (tableInDOM) {
-                const domCells = tableInDOM.querySelectorAll('td');
-                if (domCells.length === tableLine.cols) {
-                  oldColumnWidths = [];
-                  domCells.forEach(cell => {
-                    const style = cell.getAttribute('style') || '';
-                    const widthMatch = style.match(/width:\s*([0-9.]+)%/);
-                    if (widthMatch) {
-                      oldColumnWidths.push(parseFloat(widthMatch[1]));
-                    } else {
-                      oldColumnWidths.push(100 / tableLine.cols);
-                    }
-                  });
-                  console.log('[ep_tables5] deleteTableColumn: Extracted column widths from DOM:', oldColumnWidths);
-                }
-              }
-            }
-          } catch (e) {
-            console.error('[ep_tables5] deleteTableColumn: Error extracting column widths from DOM:', e);
-          }
-        }
-        
-        // Fallback to equal distribution if still not found
-        if (!oldColumnWidths) {
-          oldColumnWidths = Array(tableLine.cols).fill(100 / tableLine.cols);
-        }
-        
-        const newColumnWidths = [...oldColumnWidths];
-        newColumnWidths.splice(targetColIndex, 1);
-        
-        // Normalize remaining widths to sum to 100%
-        if (newColumnWidths.length > 0) {
-          const totalWidth = newColumnWidths.reduce((sum, width) => sum + width, 0);
-          const normalizedWidths = newColumnWidths.map(width => (width / totalWidth) * 100);
-        
-        // Update metadata
-          const newMetadata = { ...tableLine.metadata, cols: tableLine.cols - 1, columnWidths: normalizedWidths };
-        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols - 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+        // Reset all column widths to equal distribution when deleting a column
+        // This avoids complex width calculations and ensures robust behavior
+        const newColCount = tableLine.cols - 1;
+        if (newColCount > 0) {
+          const equalWidth = 100 / newColCount;
+          const normalizedWidths = Array(newColCount).fill(equalWidth);
+          console.log(`[ep_tables5] deleteTableColumn: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
+          
+          // Update metadata
+          const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
+          applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, newColCount, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
         }
       }
       
