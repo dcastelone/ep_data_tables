@@ -1347,13 +1347,48 @@ exports.aceKeyEvent = (h, ctx) => {
       return true; 
     }
 
-    const selectionStartColInLine = selStartActual[1];
-    const selectionEndColInLine = selEndActual[1];
+    let selectionStartColInLine = selStartActual[1];      // may be clamped
+    let selectionEndColInLine = selEndActual[1];          // may be clamped
 
     const currentCellFullText = cellTexts[targetCellIndex] || '';
     // cellStartCol is already defined and calculated based on trustedLastClick or fallback
     const cellContentStartColInLine = cellStartCol;
     const cellContentEndColInLine = cellStartCol + currentCellFullText.length;
+
+    /* If the user selected the whole cell plus delimiter characters,
+     * clamp the selection to just the cell content.                        */
+    const hasTrailingDelim =
+      targetCellIndex < metadataForTargetLine.cols - 1 &&
+      selectionEndColInLine === cellContentEndColInLine + DELIMITER.length;
+    
+    const hasLeadingDelim =
+      targetCellIndex > 0 &&
+      selectionStartColInLine === cellContentStartColInLine - DELIMITER.length;
+    
+    console.log(`[ep_tables5:highlight-deletion] Selection analysis:`, {
+      targetCellIndex,
+      totalCols: metadataForTargetLine.cols,
+      selectionStartCol: selectionStartColInLine,
+      selectionEndCol: selectionEndColInLine,
+      cellContentStartCol: cellContentStartColInLine,
+      cellContentEndCol: cellContentEndColInLine,
+      delimiterLength: DELIMITER.length,
+      expectedTrailingDelimiterPos: cellContentEndColInLine + DELIMITER.length,
+      expectedLeadingDelimiterPos: cellContentStartColInLine - DELIMITER.length,
+      hasTrailingDelim,
+      hasLeadingDelim,
+      cellText: currentCellFullText
+    });
+    
+    if (hasLeadingDelim) {
+      console.log(`[ep_tables5:highlight-deletion] CLAMPING selection start from ${selectionStartColInLine} to ${cellContentStartColInLine}`);
+      selectionStartColInLine = cellContentStartColInLine;
+    }
+    
+    if (hasTrailingDelim) {
+      console.log(`[ep_tables5:highlight-deletion] CLAMPING selection end from ${selectionEndColInLine} to ${cellContentEndColInLine}`);
+      selectionEndColInLine = cellContentEndColInLine;
+    }
 
     // log(`${logPrefix} [selection] Cell context for selection: targetCellIndex=${targetCellIndex}, cellStartColInLine=${cellContentStartColInLine}, cellEndColInLine=${cellContentEndColInLine}, currentCellFullText='${currentCellFullText}'`);
 
@@ -1420,6 +1455,17 @@ exports.aceKeyEvent = (h, ctx) => {
       try {
         // const repBeforeEdit = editorInfo.ace_getRep(); // Get rep before edit for attribute helper - MOVED UP
         editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, replacementText);
+
+        // NEW: ensure the replacement text inherits the cell attribute so the
+        //       author-span (& tblCell-N) comes back immediately
+        if (replacementText.length > 0) {
+          const attrStart = [currentLineNum, selectionStartColInLine];
+          const attrEnd   = [currentLineNum, selectionStartColInLine + replacementText.length];
+          console.log(`[ep_tables5:highlight-deletion] Applying cell attribute to replacement text "${replacementText}" at range [${attrStart[0]},${attrStart[1]}] to [${attrEnd[0]},${attrEnd[1]}]`);
+          editorInfo.ace_performDocumentApplyAttributesToRange(
+            attrStart, attrEnd, [[ATTR_CELL, String(targetCellIndex)]],
+          );
+        }
         const repAfterReplace = editorInfo.ace_getRep();
         // log(`${logPrefix} [caretTrace] [selection] rep.selStart after ace_performDocumentReplaceRange: Line=${repAfterReplace.selStart[0]}, Col=${repAfterReplace.selStart[1]}`);
 
@@ -1921,6 +1967,32 @@ exports.aceInitialized = (h, ctx) => {
         currentOffset += cellLength + DELIMITER.length;
       }
 
+      /* allow "…cell content + delimiter" selections */
+      const wouldClampStart = targetCellIndex > 0 && selStart[1] === cellStartCol - DELIMITER.length;
+      const wouldClampEnd = targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length;
+      
+      console.log(`[ep_tables5:cut-handler] Cut selection analysis:`, {
+        targetCellIndex,
+        selStartCol: selStart[1],
+        selEndCol: selEnd[1],
+        cellStartCol,
+        cellEndCol,
+        delimiterLength: DELIMITER.length,
+        expectedLeadingDelimiterPos: cellStartCol - DELIMITER.length,
+        expectedTrailingDelimiterPos: cellEndCol + DELIMITER.length,
+        wouldClampStart,
+        wouldClampEnd
+      });
+      
+      if (wouldClampStart) {
+        console.log(`[ep_tables5:cut-handler] CLAMPING cut selection start from ${selStart[1]} to ${cellStartCol}`);
+        selStart[1] = cellStartCol;          // clamp
+      }
+      
+      if (wouldClampEnd) {
+        console.log(`[ep_tables5:cut-handler] CLAMPING cut selection end from ${selEnd[1]} to ${cellEndCol}`);
+        selEnd[1] = cellEndCol;              // clamp
+      }
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
         // log(`${cutLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing cut to protect table structure.`);
         evt.preventDefault();
@@ -1979,6 +2051,13 @@ exports.aceInitialized = (h, ctx) => {
             // log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after cut – inserting single space to preserve structure.`);
             const insertPos = [lineNum, selStart[1]]; // Start of the now-empty cell
             aceInstance.ace_performDocumentReplaceRange(insertPos, insertPos, ' ');
+
+            // NEW – re-apply td attribute to the freshly inserted space
+            const attrStart = insertPos;
+            const attrEnd   = [insertPos[0], insertPos[1] + 1];
+            aceInstance.ace_performDocumentApplyAttributesToRange(
+              attrStart, attrEnd, [[ATTR_CELL, String(targetCellIndex)]],
+            );
           }
 
           // log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
@@ -2094,6 +2173,33 @@ exports.aceInitialized = (h, ctx) => {
         currentOffset += cellLength + DELIMITER.length;
       }
 
+      /* allow "…cell content + delimiter" selections */
+      const wouldClampStart = targetCellIndex > 0 && selStart[1] === cellStartCol - DELIMITER.length;
+      const wouldClampEnd = targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length;
+      
+      console.log(`[ep_tables5:beforeinput-delete] Delete selection analysis:`, {
+        targetCellIndex,
+        selStartCol: selStart[1],
+        selEndCol: selEnd[1],
+        cellStartCol,
+        cellEndCol,
+        delimiterLength: DELIMITER.length,
+        expectedLeadingDelimiterPos: cellStartCol - DELIMITER.length,
+        expectedTrailingDelimiterPos: cellEndCol + DELIMITER.length,
+        wouldClampStart,
+        wouldClampEnd
+      });
+      
+      if (wouldClampStart) {
+        console.log(`[ep_tables5:beforeinput-delete] CLAMPING delete selection start from ${selStart[1]} to ${cellStartCol}`);
+        selStart[1] = cellStartCol;          // clamp
+      }
+      
+      if (wouldClampEnd) {
+        console.log(`[ep_tables5:beforeinput-delete] CLAMPING delete selection end from ${selEnd[1]} to ${cellEndCol}`);
+        selEnd[1] = cellEndCol;              // clamp
+      }
+      
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
         // log(`${deleteLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing delete to protect table structure.`);
         evt.preventDefault();
@@ -2125,6 +2231,13 @@ exports.aceInitialized = (h, ctx) => {
             // log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after delete – inserting single space to preserve structure.`);
             const insertPos = [lineNum, selStart[1]]; // Start of the now-empty cell
             aceInstance.ace_performDocumentReplaceRange(insertPos, insertPos, ' ');
+
+            // NEW – give the placeholder its cell attribute back
+            const attrStart = insertPos;
+            const attrEnd   = [insertPos[0], insertPos[1] + 1];
+            aceInstance.ace_performDocumentApplyAttributesToRange(
+              attrStart, attrEnd, [[ATTR_CELL, String(targetCellIndex)]],
+            );
           }
 
           // log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
@@ -2310,6 +2423,11 @@ exports.aceInitialized = (h, ctx) => {
         currentOffset += cellLength + DELIMITER.length;
       }
 
+      /* allow "…cell content + delimiter" selections */
+      if (targetCellIndex !== -1 &&
+          selEnd[1] === cellEndCol + DELIMITER.length) {
+        selEnd[1] = cellEndCol;              // clamp
+      }
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
         // log(`${pasteLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing paste to protect table structure.`);
         evt.preventDefault();
