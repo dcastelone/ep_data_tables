@@ -34,12 +34,12 @@ exports.eejsBlock_styles = (_hook, args) => {
 };
 
 /* Uncomment only if you truly need extra JS in the timeslider */
-/*
+
 exports.eejsBlock_timesliderScripts = (_hook, args) => {
   log('eejsBlock_timesliderScripts: START');
-  args.content += timesliderTag;
+  args.content +='<script src="/static/plugins/ep_tables5/static/js/datatables-renderer.js"></script>';
   log('eejsBlock_timesliderScripts: Appended timesliderTag.');
   log('eejsBlock_timesliderScripts: END');
 };
-*/
+
 log('EEJS hooks defined.');
