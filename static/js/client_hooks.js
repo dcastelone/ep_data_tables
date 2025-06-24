@@ -1,4 +1,4 @@
-/* ep_tables5 – attribute‑based tables (line‑class + PostWrite renderer)
+/* ep_data_tables – attribute‑based tables (line‑class + PostWrite renderer)
  * -----------------------------------------------------------------
  * Strategy
  *   • One line attribute   tbljson = JSON({tblId,row,cells:[{txt:"…"},…]})
@@ -16,7 +16,7 @@
 const ATTR_TABLE_JSON = 'tbljson';
 const ATTR_CELL       = 'td';
 const ATTR_CLASS_PREFIX = 'tbljson-'; // For finding the class in DOM
-const log             = (...m) => console.debug('[ep_tables5:client_hooks]', ...m);
+const log             = (...m) => console.debug('[ep_data_tables:client_hooks]', ...m);
 const DELIMITER       = '\u241F';   // Internal column delimiter (␟)
 // Use the same rare character inside the hidden span so acePostWriteDomLineHTML can
 // still find delimiters when it splits node.innerHTML.
@@ -38,11 +38,11 @@ const dec = s => {
             // Node.js environment
             return Buffer.from(str, 'base64').toString('utf8');
         } else {
-            console.error('[ep_tables5] Base64 decoding function (atob or Buffer) not found.');
+            console.error('[ep_data_tables] Base64 decoding function (atob or Buffer) not found.');
             return null;
         }
     } catch (e) {
-        console.error('[ep_tables5] Error decoding base64 string:', s, e);
+        console.error('[ep_data_tables] Error decoding base64 string:', s, e);
         return null;
     }
 };
@@ -149,7 +149,7 @@ function getTableLineMetadata(lineNum, editorInfo, docManager) {
     // log(`${funcName}: Could not find table metadata for line ${lineNum} in DOM.`);
     return null;
   } catch (e) {
-    console.error(`[ep_tables5] ${funcName}: Error getting metadata for line ${lineNum}:`, e);
+    console.error(`[ep_data_tables] ${funcName}: Error getting metadata for line ${lineNum}:`, e);
     return null;
   }
 }
@@ -204,7 +204,7 @@ function navigateToNextCell(currentLineNum, currentCellIndex, tableMetadata, shi
   return navigateToCell(targetLineNum, targetCol, editorInfo, docManager);
     
   } catch (e) {
-    console.error(`[ep_tables5] ${funcName}: Error during navigation:`, e);
+    console.error(`[ep_data_tables] ${funcName}: Error during navigation:`, e);
     return false;
   }
 }
@@ -255,13 +255,13 @@ function navigateToCellBelow(currentLineNum, currentCellIndex, tableMetadata, ed
 
       // We've now exited the table, so clear the last-clicked state.
       const editor = editorInfo.editor;
-      if (editor) editor.ep_tables5_last_clicked = null;
+      if (editor) editor.ep_data_tables_last_clicked = null;
       // log(`${funcName}: Cleared last click info as we have exited the table.`);
 
       return true; // We handled it.
     }
   } catch (e) {
-    console.error(`[ep_tables5] ${funcName}: Error during navigation:`, e);
+    console.error(`[ep_data_tables] ${funcName}: Error during navigation:`, e);
     return false;
   }
 }
@@ -321,7 +321,7 @@ function findLineForTableRow(tblId, targetRow, editorInfo, docManager) {
     // log(`${funcName}: Target row not found`);
     return -1;
   } catch (e) {
-    console.error(`[ep_tables5] ${funcName}: Error searching for line:`, e);
+    console.error(`[ep_data_tables] ${funcName}: Error searching for line:`, e);
   return -1;
   }
 }
@@ -372,18 +372,18 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
 
     // --- NEW: Update plugin state BEFORE performing the UI action ---
     try {
-      const editor = editorInfo.ep_tables5_editor;
+      const editor = editorInfo.ep_data_tables_editor;
       // Use the new robust helper to get metadata, which handles block-styled lines.
     const tableMetadata = getTableLineMetadata(targetLineNum, editorInfo, docManager);
 
     if (editor && tableMetadata) {
-      editor.ep_tables5_last_clicked = {
+      editor.ep_data_tables_last_clicked = {
         lineNum: targetLineNum,
         tblId: tableMetadata.tblId,
         cellIndex: targetCellIndex,
         relativePos: targetCellContent.length,
       };
-        // log(`${funcName}: Pre-emptively updated stored click info:`, editor.ep_tables5_last_clicked);
+        // log(`${funcName}: Pre-emptively updated stored click info:`, editor.ep_data_tables_last_clicked);
       } else {
         // log(`${funcName}: Could not get table metadata for target line ${targetLineNum}, cannot update click info.`);
       }
@@ -411,13 +411,13 @@ function navigateToCell(targetLineNum, targetCellIndex, editorInfo, docManager) 
       // log(`${funcName}: Editor focused.`);
 
     } catch(e) {
-      console.error(`[ep_tables5] ${funcName}: Error during direct navigation update:`, e);
+      console.error(`[ep_data_tables] ${funcName}: Error during direct navigation update:`, e);
       return false;
     }
     
   } catch (e) {
     // This synchronous catch is a fallback, though the error was happening asynchronously.
-    console.error(`[ep_tables5] ${funcName}: Error during cell navigation:`, e);
+    console.error(`[ep_data_tables] ${funcName}: Error during cell navigation:`, e);
     return false;
   }
 
@@ -544,7 +544,7 @@ exports.collectContentPre = (hook, ctx) => {
             }
           }
     } catch (e) {
-          console.error(`[ep_tables5] ${funcName}: Line ${lineNum} error during DOM reconstruction:`, e);
+          console.error(`[ep_data_tables] ${funcName}: Line ${lineNum} error during DOM reconstruction:`, e);
           // log(`${funcName}: Line ${lineNum} Exception details:`, { message: e.message, stack: e.stack });
         }
       } else {
@@ -578,7 +578,7 @@ exports.collectContentPre = (hook, ctx) => {
             // log(`${funcName}: Secondary path - ERROR - Decoded metadata is null or empty for class ${cls}`);
         }
       } catch (e) {
-          console.error(`[ep_tables5] ${funcName}: Secondary path - Error processing tbljson class ${cls} on ${node?.tagName}:`, e);
+          console.error(`[ep_data_tables] ${funcName}: Secondary path - Error processing tbljson class ${cls} on ${node?.tagName}:`, e);
       }
         break; 
       }
@@ -652,7 +652,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   // log(`${funcName}: START`, { metadata, innerHTMLSegments });
 
   if (!metadata || typeof metadata.tblId === 'undefined' || typeof metadata.row === 'undefined') {
-    console.error(`[ep_tables5] ${funcName}: Invalid or missing metadata. Aborting.`);
+    console.error(`[ep_data_tables] ${funcName}: Invalid or missing metadata. Aborting.`);
     // log(`${funcName}: END - Error`);
     return '<table class="dataTable dataTable-error"><tbody><tr><td>Error: Missing table metadata</td></tr></tbody></table>'; // Return error table
   }
@@ -722,13 +722,13 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   const node = args?.node;
   const nodeId = node?.id;
   const lineNum = args?.lineNumber; // Etherpad >= 1.9 provides lineNumber
-  const logPrefix = '[ep_tables5:acePostWriteDomLineHTML]'; // Consistent prefix
+  const logPrefix = '[ep_data_tables:acePostWriteDomLineHTML]'; // Consistent prefix
 
   // *** STARTUP LOGGING ***
   // log(`${logPrefix} ----- START ----- NodeID: ${nodeId} LineNum: ${lineNum}`);
   if (!node || !nodeId) {
       // log(`${logPrefix} ERROR - Received invalid node or node without ID. Aborting.`);
-      console.error(`[ep_tables5] ${funcName}: Received invalid node or node without ID.`);
+      console.error(`[ep_data_tables] ${funcName}: Received invalid node or node without ID.`);
     return cb();
   }
 
@@ -882,9 +882,9 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
 
   } catch(e) { 
       // log(`${logPrefix} NodeID#${nodeId}: FATAL ERROR - Failed to decode/parse/validate tbljson metadata. Rendering cannot proceed.`, e);
-      console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Failed to decode/parse/validate tbljson.`, encodedJsonString, e);
+      console.error(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Failed to decode/parse/validate tbljson.`, encodedJsonString, e);
       // Optionally render an error state in the node?
-      node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Invalid table metadata attribute found.</div>';
+      node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_data_tables] Error: Invalid table metadata attribute found.</div>';
       // log(`${logPrefix} NodeID#${nodeId}: Rendered error message in node. END.`);
     return cb();
   }
@@ -951,7 +951,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   if (htmlSegments.length !== rowMetadata.cols) {
       // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED ***`);
       // log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Auto-reconstructing table structure.`);
-      console.warn(`[ep_tables5] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
+      console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
       
       // *** ENHANCED DEBUG: Analyze why we have a mismatch ***
       // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH ANALYSIS ***`);
@@ -1036,8 +1036,8 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
       // log(`${logPrefix} NodeID#${nodeId}: Successfully replaced content with new table structure.`);
   } catch (renderError) {
       // log(`${logPrefix} NodeID#${nodeId}: ERROR during table building or rendering.`, renderError);
-      console.error(`[ep_tables5] ${funcName} NodeID#${nodeId}: Error building/rendering table.`, renderError);
-      node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_tables5] Error: Failed to render table structure.</div>';
+      console.error(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Error building/rendering table.`, renderError);
+      node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_data_tables] Error: Failed to render table structure.</div>';
       // log(`${logPrefix} NodeID#${nodeId}: Rendered build/render error message in node. END.`);
       return cb();
   }
@@ -1071,7 +1071,7 @@ exports.aceKeyEvent = (h, ctx) => {
   const docManager = ctx.documentAttributeManager;
 
   const startLogTime = Date.now();
-  const logPrefix = '[ep_tables5:aceKeyEvent]';
+  const logPrefix = '[ep_data_tables:aceKeyEvent]';
   // log(`${logPrefix} START Key='${evt?.key}' Code=${evt?.keyCode} Type=${evt?.type} Modifiers={ctrl:${evt?.ctrlKey},alt:${evt?.altKey},meta:${evt?.metaKey},shift:${evt?.shiftKey}}`, { selStart: rep?.selStart, selEnd: rep?.selEnd });
 
   if (!rep || !rep.selStart || !editorInfo || !evt || !docManager) {
@@ -1150,7 +1150,7 @@ exports.aceKeyEvent = (h, ctx) => {
 
   // Get last known good state
   const editor = editorInfo.editor; // Get editor instance
-  const lastClick = editor?.ep_tables5_last_clicked; // Read shared state
+  const lastClick = editor?.ep_data_tables_last_clicked; // Read shared state
   // log(`${logPrefix} Reading stored click/caret info:`, lastClick);
 
   // --- Determine the TRUE target line, cell, and caret position --- 
@@ -1215,11 +1215,11 @@ exports.aceKeyEvent = (h, ctx) => {
               }
           } else {
               // log(`${logPrefix} Stored click info INVALID (Metadata missing/invalid or tblId mismatch). Clearing stored state.`);
-              if (editor) editor.ep_tables5_last_clicked = null;
+              if (editor) editor.ep_data_tables_last_clicked = null;
           }
       } catch (e) {
            console.error(`${logPrefix} Error validating stored click info for line ${lastClick.lineNum}.`, e);
-           if (editor) editor.ep_tables5_last_clicked = null; // Clear on error
+           if (editor) editor.ep_data_tables_last_clicked = null; // Clear on error
       }
   }
   
@@ -1325,7 +1325,7 @@ exports.aceKeyEvent = (h, ctx) => {
   // --- Final Validation --- 
   if (currentLineNum < 0 || targetCellIndex < 0 || !metadataForTargetLine || targetCellIndex >= metadataForTargetLine.cols) {
        // log(`${logPrefix} FAILED final validation: Line=${currentLineNum}, Cell=${targetCellIndex}, Metadata=${!!metadataForTargetLine}. Allowing default.`);
-    if (editor) editor.ep_tables5_last_clicked = null;
+    if (editor) editor.ep_data_tables_last_clicked = null;
     return false;
   }
 
@@ -1365,7 +1365,7 @@ exports.aceKeyEvent = (h, ctx) => {
       targetCellIndex > 0 &&
       selectionStartColInLine === cellContentStartColInLine - DELIMITER.length;
     
-    console.log(`[ep_tables5:highlight-deletion] Selection analysis:`, {
+    console.log(`[ep_data_tables:highlight-deletion] Selection analysis:`, {
       targetCellIndex,
       totalCols: metadataForTargetLine.cols,
       selectionStartCol: selectionStartColInLine,
@@ -1381,12 +1381,12 @@ exports.aceKeyEvent = (h, ctx) => {
     });
     
     if (hasLeadingDelim) {
-      console.log(`[ep_tables5:highlight-deletion] CLAMPING selection start from ${selectionStartColInLine} to ${cellContentStartColInLine}`);
+      console.log(`[ep_data_tables:highlight-deletion] CLAMPING selection start from ${selectionStartColInLine} to ${cellContentStartColInLine}`);
       selectionStartColInLine = cellContentStartColInLine;
     }
     
     if (hasTrailingDelim) {
-      console.log(`[ep_tables5:highlight-deletion] CLAMPING selection end from ${selectionEndColInLine} to ${cellContentEndColInLine}`);
+      console.log(`[ep_data_tables:highlight-deletion] CLAMPING selection end from ${selectionEndColInLine} to ${cellContentEndColInLine}`);
       selectionEndColInLine = cellContentEndColInLine;
     }
 
@@ -1461,7 +1461,7 @@ exports.aceKeyEvent = (h, ctx) => {
         if (replacementText.length > 0) {
           const attrStart = [currentLineNum, selectionStartColInLine];
           const attrEnd   = [currentLineNum, selectionStartColInLine + replacementText.length];
-          console.log(`[ep_tables5:highlight-deletion] Applying cell attribute to replacement text "${replacementText}" at range [${attrStart[0]},${attrStart[1]}] to [${attrEnd[0]},${attrEnd[1]}]`);
+          console.log(`[ep_data_tables:highlight-deletion] Applying cell attribute to replacement text "${replacementText}" at range [${attrStart[0]},${attrStart[1]}] to [${attrEnd[0]},${attrEnd[1]}]`);
           editorInfo.ace_performDocumentApplyAttributesToRange(
             attrStart, attrEnd, [[ATTR_CELL, String(targetCellIndex)]],
           );
@@ -1471,7 +1471,7 @@ exports.aceKeyEvent = (h, ctx) => {
 
 
         // log(`${logPrefix} [selection] -> Re-applying tbljson line attribute...`);
-        const applyHelper = editorInfo.ep_tables5_applyMeta;
+        const applyHelper = editorInfo.ep_data_tables_applyMeta;
         if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) {
           const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
           applyHelper(currentLineNum, metadataForTargetLine.tblId, metadataForTargetLine.row, metadataForTargetLine.cols, repBeforeEdit, editorInfo, attrStringToApply, docManager);
@@ -1508,22 +1508,22 @@ exports.aceKeyEvent = (h, ctx) => {
 
         const newRelativePos = newAbsoluteCaretCol - cellStartCol;
         if (editor) {
-            editor.ep_tables5_last_clicked = {
+            editor.ep_data_tables_last_clicked = {
                 lineNum: currentLineNum,
                 tblId: metadataForTargetLine.tblId,
                 cellIndex: targetCellIndex,
                 relativePos: newRelativePos < 0 ? 0 : newRelativePos
             };
-            // log(`${logPrefix} [selection] -> Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
+            // log(`${logPrefix} [selection] -> Updated stored click/caret info:`, editor.ep_data_tables_last_clicked);
         } else {
-            // log(`${logPrefix} [selection] -> Editor instance not found, cannot update ep_tables5_last_clicked.`);
+            // log(`${logPrefix} [selection] -> Editor instance not found, cannot update ep_data_tables_last_clicked.`);
         }
         
         // log(`${logPrefix} END [selection] (Handled highlight modification) Key='${evt.key}' Type='${evt.type}'. Duration: ${Date.now() - startLogTime}ms`);
       return true;
       } catch (error) {
         // log(`${logPrefix} [selection] ERROR during highlight modification:`, error);
-        console.error('[ep_tables5] Error processing highlight modification:', error);
+        console.error('[ep_data_tables] Error processing highlight modification:', error);
         return true; // Still return true as we prevented default.
       }
     }
@@ -1584,7 +1584,7 @@ exports.aceKeyEvent = (h, ctx) => {
   // 1. Allow non-Tab navigation keys immediately
   if (isNavigationKey && !isTabKey) {
       // log(`${logPrefix} Allowing navigation key: ${evt.key}. Clearing click state.`);
-      if (editor) editor.ep_tables5_last_clicked = null; // Clear state on navigation
+      if (editor) editor.ep_data_tables_last_clicked = null; // Clear state on navigation
       return false;
   }
 
@@ -1727,7 +1727,7 @@ exports.aceKeyEvent = (h, ctx) => {
         // log(`${logPrefix} DEBUG: Before calculating attrStringToApply - trustedLastClick=${trustedLastClick}, reportedLineNum=${reportedLineNum}, currentLineNum=${currentLineNum}`);
         // log(`${logPrefix} DEBUG: lineAttrString value:`, lineAttrString ? `"${lineAttrString}"` : 'null/undefined');
         
-        const applyHelper = editorInfo.ep_tables5_applyMeta; 
+        const applyHelper = editorInfo.ep_data_tables_applyMeta; 
         if (applyHelper && typeof applyHelper === 'function' && repBeforeEdit) { 
              // Pass the original lineAttrString if available AND if it belongs to the currentLineNum
              const attrStringToApply = (trustedLastClick || reportedLineNum === currentLineNum) ? lineAttrString : null;
@@ -1775,14 +1775,14 @@ exports.aceKeyEvent = (h, ctx) => {
 
                 // Store the updated caret info for the next event
                 const newRelativePos = newAbsoluteCaretCol - cellStartCol;
-                editor.ep_tables5_last_clicked = {
+                editor.ep_data_tables_last_clicked = {
                     lineNum: currentLineNum, 
                     tblId: metadataForTargetLine.tblId,
                     cellIndex: targetCellIndex,
                     relativePos: newRelativePos
                 };
-                // log(`${logPrefix} -> Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
-                // log(`${logPrefix} [caretTrace] Updated ep_tables5_last_clicked. Line=${editor.ep_tables5_last_clicked.lineNum}, Cell=${editor.ep_tables5_last_clicked.cellIndex}, RelPos=${editor.ep_tables5_last_clicked.relativePos}`);
+                // log(`${logPrefix} -> Updated stored click/caret info:`, editor.ep_data_tables_last_clicked);
+                // log(`${logPrefix} [caretTrace] Updated ep_data_tables_last_clicked. Line=${editor.ep_data_tables_last_clicked.lineNum}, Cell=${editor.ep_data_tables_last_clicked.cellIndex}, RelPos=${editor.ep_data_tables_last_clicked.relativePos}`);
 
 
             } catch (selError) {
@@ -1794,7 +1794,7 @@ exports.aceKeyEvent = (h, ctx) => {
 
         } catch (error) {
         // log(`${logPrefix} ERROR during manual key handling:`, error);
-            console.error('[ep_tables5] Error processing key event update:', error);
+            console.error('[ep_data_tables] Error processing key event update:', error);
         // Maybe return false to allow default as a fallback on error?
         // For now, return true as we prevented default.
     return true;
@@ -1811,31 +1811,31 @@ exports.aceKeyEvent = (h, ctx) => {
   const endLogTimeFinal = Date.now();
   // log(`${logPrefix} END (Fell Through / Unhandled Case) Key='${evt.key}' Type='${evt.type}'. Allowing default. Duration: ${endLogTimeFinal - startLogTime}ms`);
   // Clear click state if it wasn't handled?
-  // if (editor?.ep_tables5_last_clicked) editor.ep_tables5_last_clicked = null;
+  // if (editor?.ep_data_tables_last_clicked) editor.ep_data_tables_last_clicked = null;
   // log(`${logPrefix} [caretTrace] Final rep.selStart at end of aceKeyEvent (if unhandled): Line=${rep.selStart[0]}, Col=${rep.selStart[1]}`);
   return false; // Allow default browser/ACE handling
 };
 
 // ───────────────────── ace init + public helpers ─────────────────────
 exports.aceInitialized = (h, ctx) => {
-  const logPrefix = '[ep_tables5:aceInitialized]';
+  const logPrefix = '[ep_data_tables:aceInitialized]';
   // log(`${logPrefix} START`, { hook_name: h, context: ctx });
   const ed = ctx.editorInfo;
   const docManager = ctx.documentAttributeManager;
 
-  // log(`${logPrefix} Attaching ep_tables5_applyMeta helper to editorInfo.`);
-  ed.ep_tables5_applyMeta = applyTableLineMetadataAttribute;
-  // log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_tables5_applyMeta successfully.`);
+  // log(`${logPrefix} Attaching ep_data_tables_applyMeta helper to editorInfo.`);
+  ed.ep_data_tables_applyMeta = applyTableLineMetadataAttribute;
+  // log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_data_tables_applyMeta successfully.`);
 
   // Store the documentAttributeManager reference for later use
   // log(`${logPrefix} Storing documentAttributeManager reference on editorInfo.`);
-  ed.ep_tables5_docManager = docManager;
-  // log(`${logPrefix}: Stored documentAttributeManager reference as ed.ep_tables5_docManager.`);
+  ed.ep_data_tables_docManager = docManager;
+  // log(`${logPrefix}: Stored documentAttributeManager reference as ed.ep_data_tables_docManager.`);
 
   // *** ENHANCED: Paste event listener + Column resize listeners ***
   // log(`${logPrefix} Preparing to attach paste and resize listeners via ace_callWithAce.`);
   ed.ace_callWithAce((ace) => {
-    const callWithAceLogPrefix = '[ep_tables5:aceInitialized:callWithAceForListeners]';
+    const callWithAceLogPrefix = '[ep_data_tables:aceInitialized:callWithAceForListeners]';
     // log(`${callWithAceLogPrefix} Entered ace_callWithAce callback for listeners.`);
 
     if (!ace || !ace.editor) {
@@ -1848,8 +1848,8 @@ exports.aceInitialized = (h, ctx) => {
 
     // Store editor reference for later use in table operations
     // log(`${logPrefix} Storing editor reference on editorInfo.`);
-    ed.ep_tables5_editor = editor;
-    // log(`${logPrefix}: Stored editor reference as ed.ep_tables5_editor.`);
+    ed.ep_data_tables_editor = editor;
+    // log(`${logPrefix}: Stored editor reference as ed.ep_data_tables_editor.`);
 
     // Attempt to find the inner iframe body, similar to ep_image_insert
     let $inner;
@@ -1894,7 +1894,7 @@ exports.aceInitialized = (h, ctx) => {
     // *** CUT EVENT LISTENER ***
     // log(`${callWithAceLogPrefix} Attaching cut event listener to $inner (inner iframe body).`);
     $inner.on('cut', (evt) => {
-      const cutLogPrefix = '[ep_tables5:cutHandler]';
+      const cutLogPrefix = '[ep_data_tables:cutHandler]';
       // log(`${cutLogPrefix} CUT EVENT TRIGGERED. Event object:`, evt);
 
       // log(`${cutLogPrefix} Getting current editor representation (rep).`);
@@ -1971,7 +1971,7 @@ exports.aceInitialized = (h, ctx) => {
       const wouldClampStart = targetCellIndex > 0 && selStart[1] === cellStartCol - DELIMITER.length;
       const wouldClampEnd = targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length;
       
-      console.log(`[ep_tables5:cut-handler] Cut selection analysis:`, {
+      console.log(`[ep_data_tables:cut-handler] Cut selection analysis:`, {
         targetCellIndex,
         selStartCol: selStart[1],
         selEndCol: selEnd[1],
@@ -1985,12 +1985,12 @@ exports.aceInitialized = (h, ctx) => {
       });
       
       if (wouldClampStart) {
-        console.log(`[ep_tables5:cut-handler] CLAMPING cut selection start from ${selStart[1]} to ${cellStartCol}`);
+        console.log(`[ep_data_tables:cut-handler] CLAMPING cut selection start from ${selStart[1]} to ${cellStartCol}`);
         selStart[1] = cellStartCol;          // clamp
       }
       
       if (wouldClampEnd) {
-        console.log(`[ep_tables5:cut-handler] CLAMPING cut selection end from ${selEnd[1]} to ${cellEndCol}`);
+        console.log(`[ep_data_tables:cut-handler] CLAMPING cut selection end from ${selEnd[1]} to ${cellEndCol}`);
         selEnd[1] = cellEndCol;              // clamp
       }
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
@@ -2064,7 +2064,7 @@ exports.aceInitialized = (h, ctx) => {
           const repAfterCut = aceInstance.ace_getRep();
           // log(`${callAceLogPrefix} Fetched rep after cut for applyMeta. Line ${lineNum} text now: "${repAfterCut.lines.atIndex(lineNum).text}"`);
           
-          ed.ep_tables5_applyMeta(
+          ed.ep_data_tables_applyMeta(
             lineNum,
             tableMetadata.tblId,
             tableMetadata.row,
@@ -2074,7 +2074,7 @@ exports.aceInitialized = (h, ctx) => {
             null,
             docManager
           );
-          // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+          // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_data_tables_applyMeta.`);
 
           const newCaretPos = [lineNum, selStart[1]];
           // log(`${callAceLogPrefix} Setting caret position to: [${newCaretPos}].`);
@@ -2094,7 +2094,7 @@ exports.aceInitialized = (h, ctx) => {
     // *** BEFOREINPUT EVENT LISTENER FOR CONTEXT-MENU DELETE ***
     // log(`${callWithAceLogPrefix} Attaching beforeinput event listener to $inner (inner iframe body).`);
     $inner.on('beforeinput', (evt) => {
-      const deleteLogPrefix = '[ep_tables5:beforeinputDeleteHandler]';
+      const deleteLogPrefix = '[ep_data_tables:beforeinputDeleteHandler]';
       // log(`${deleteLogPrefix} BEFOREINPUT EVENT TRIGGERED. inputType: "${evt.originalEvent.inputType}", event object:`, evt);
 
       // Only intercept deletion-related input events
@@ -2177,7 +2177,7 @@ exports.aceInitialized = (h, ctx) => {
       const wouldClampStart = targetCellIndex > 0 && selStart[1] === cellStartCol - DELIMITER.length;
       const wouldClampEnd = targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length;
       
-      console.log(`[ep_tables5:beforeinput-delete] Delete selection analysis:`, {
+      console.log(`[ep_data_tables:beforeinput-delete] Delete selection analysis:`, {
         targetCellIndex,
         selStartCol: selStart[1],
         selEndCol: selEnd[1],
@@ -2191,12 +2191,12 @@ exports.aceInitialized = (h, ctx) => {
       });
       
       if (wouldClampStart) {
-        console.log(`[ep_tables5:beforeinput-delete] CLAMPING delete selection start from ${selStart[1]} to ${cellStartCol}`);
+        console.log(`[ep_data_tables:beforeinput-delete] CLAMPING delete selection start from ${selStart[1]} to ${cellStartCol}`);
         selStart[1] = cellStartCol;          // clamp
       }
       
       if (wouldClampEnd) {
-        console.log(`[ep_tables5:beforeinput-delete] CLAMPING delete selection end from ${selEnd[1]} to ${cellEndCol}`);
+        console.log(`[ep_data_tables:beforeinput-delete] CLAMPING delete selection end from ${selEnd[1]} to ${cellEndCol}`);
         selEnd[1] = cellEndCol;              // clamp
       }
       
@@ -2244,7 +2244,7 @@ exports.aceInitialized = (h, ctx) => {
           const repAfterDelete = aceInstance.ace_getRep();
           // log(`${callAceLogPrefix} Fetched rep after delete for applyMeta. Line ${lineNum} text now: "${repAfterDelete.lines.atIndex(lineNum).text}"`);
           
-          ed.ep_tables5_applyMeta(
+          ed.ep_data_tables_applyMeta(
             lineNum,
             tableMetadata.tblId,
             tableMetadata.row,
@@ -2254,7 +2254,7 @@ exports.aceInitialized = (h, ctx) => {
             null,
             docManager
           );
-          // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+          // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_data_tables_applyMeta.`);
 
           // Determine new caret position – one char forward if we inserted a space
           const newCaretAbsoluteCol = (cellTextAfterDeletion.length === 0) ? selStart[1] + 1 : selStart[1];
@@ -2278,7 +2278,7 @@ exports.aceInitialized = (h, ctx) => {
     
     // Prevent drops that could damage table structure
     $inner.on('drop', (evt) => {
-      const dropLogPrefix = '[ep_tables5:dropHandler]';
+      const dropLogPrefix = '[ep_data_tables:dropHandler]';
       // log(`${dropLogPrefix} DROP EVENT TRIGGERED. Event object:`, evt);
 
       // log(`${dropLogPrefix} Getting current editor representation (rep).`);
@@ -2306,13 +2306,13 @@ exports.aceInitialized = (h, ctx) => {
       // log(`${dropLogPrefix} Line ${lineNum} IS a table line. Preventing drop to protect table structure.`);
       evt.preventDefault();
       evt.stopPropagation();
-      console.warn('[ep_tables5] Drop operation prevented to protect table structure. Please use copy/paste within table cells.');
+      console.warn('[ep_data_tables] Drop operation prevented to protect table structure. Please use copy/paste within table cells.');
       }
     });
 
     // Also prevent dragover to ensure drop events are properly handled
     $inner.on('dragover', (evt) => {
-      const dragLogPrefix = '[ep_tables5:dragoverHandler]';
+      const dragLogPrefix = '[ep_data_tables:dragoverHandler]';
       
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) {
@@ -2340,7 +2340,7 @@ exports.aceInitialized = (h, ctx) => {
     // *** EXISTING PASTE LISTENER ***
     // log(`${callWithAceLogPrefix} Attaching paste event listener to $inner (inner iframe body).`);
     $inner.on('paste', (evt) => {
-      const pasteLogPrefix = '[ep_tables5:pasteHandler]';
+      const pasteLogPrefix = '[ep_data_tables:pasteHandler]';
       // log(`${pasteLogPrefix} PASTE EVENT TRIGGERED. Event object:`, evt);
 
       // log(`${pasteLogPrefix} Getting current editor representation (rep).`);
@@ -2520,7 +2520,7 @@ exports.aceInitialized = (h, ctx) => {
             const repAfterReplace = aceInstance.ace_getRep();
             // log(`${callAceLogPrefix} Fetched rep after replace for applyMeta. Line ${lineNum} text now: "${repAfterReplace.lines.atIndex(lineNum).text}"`);
             
-            ed.ep_tables5_applyMeta(
+            ed.ep_data_tables_applyMeta(
               lineNum,
               tableMetadata.tblId,
               tableMetadata.row,
@@ -2530,7 +2530,7 @@ exports.aceInitialized = (h, ctx) => {
               null,
               docManager
             );
-            // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_tables5_applyMeta.`);
+            // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_data_tables_applyMeta.`);
 
             const newCaretCol = selStart[1] + pastedText.length;
             const newCaretPos = [lineNum, newCaretCol];
@@ -2543,15 +2543,15 @@ exports.aceInitialized = (h, ctx) => {
             // log(`${callAceLogPrefix} fastIncorp requested.`);
 
             // Update stored click/caret info
-            if (editor && editor.ep_tables5_last_clicked && editor.ep_tables5_last_clicked.tblId === tableMetadata.tblId) {
+            if (editor && editor.ep_data_tables_last_clicked && editor.ep_data_tables_last_clicked.tblId === tableMetadata.tblId) {
                const newRelativePos = newCaretCol - cellStartCol;
-               editor.ep_tables5_last_clicked = {
+               editor.ep_data_tables_last_clicked = {
                   lineNum: lineNum,
                   tblId: tableMetadata.tblId,
                   cellIndex: targetCellIndex,
                   relativePos: newRelativePos < 0 ? 0 : newRelativePos,
                };
-               // log(`${callAceLogPrefix} Updated stored click/caret info:`, editor.ep_tables5_last_clicked);
+               // log(`${callAceLogPrefix} Updated stored click/caret info:`, editor.ep_data_tables_last_clicked);
             }
 
             // log(`${callAceLogPrefix} Paste operations within ace_callWithAce completed successfully.`);
@@ -2579,7 +2579,7 @@ exports.aceInitialized = (h, ctx) => {
     
     // Mousedown on resize handles
     $inner.on('mousedown', '.ep-tables5-resize-handle', (evt) => {
-      const resizeLogPrefix = '[ep_tables5:resizeMousedown]';
+      const resizeLogPrefix = '[ep_data_tables:resizeMousedown]';
       // log(`${resizeLogPrefix} Resize handle mousedown detected`);
       
       // Only handle left mouse button clicks
@@ -2709,8 +2709,8 @@ exports.aceInitialized = (h, ctx) => {
     
     // Enhanced mousemove and mouseup handlers - attach to multiple contexts for better coverage
     const setupGlobalHandlers = () => {
-      const mouseupLogPrefix = '[ep_tables5:resizeMouseup]';
-      const mousemoveLogPrefix = '[ep_tables5:resizeMousemove]';
+      const mouseupLogPrefix = '[ep_data_tables:resizeMouseup]';
+      const mousemoveLogPrefix = '[ep_data_tables:resizeMousemove]';
       
       // Mousemove handler
       const handleMousemove = (evt) => {
@@ -2796,7 +2796,7 @@ exports.aceInitialized = (h, ctx) => {
             target.tagName === 'TD' && target.closest('table.dataTable') ||
             target.tagName === 'TR' && target.closest('table.dataTable') ||
             target.tagName === 'TBODY' && target.closest('table.dataTable')) {
-          // log('[ep_tables5:dragPrevention] Preventing drag operation on table element:', target.tagName);
+          // log('[ep_data_tables:dragPrevention] Preventing drag operation on table element:', target.tagName);
           evt.preventDefault();
           evt.stopPropagation();
           return false;
@@ -2915,7 +2915,7 @@ exports.aceInitialized = (h, ctx) => {
        // log(`${logPrefix}:${funcName}: Successfully applied tbljson attribute to line ${lineNum}`);
         
     } catch(e) {
-        console.error(`[ep_tables5] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
+        console.error(`[ep_data_tables] ${logPrefix}:${funcName}: Error applying metadata attribute on line ${lineNum}:`, e);
     }
   }
 
@@ -2939,7 +2939,7 @@ exports.aceInitialized = (h, ctx) => {
     // log(`${funcName}: Getting current representation and selection...`);
     const currentRepInitial = ed.ace_getRep(); 
     if (!currentRepInitial || !currentRepInitial.selStart || !currentRepInitial.selEnd) {
-        console.error(`[ep_tables5] ${funcName}: Could not get current representation or selection via ace_getRep(). Aborting.`);
+        console.error(`[ep_data_tables] ${funcName}: Could not get current representation or selection via ace_getRep(). Aborting.`);
         // log(`${funcName}: END - Error getting initial rep/selection`);
         return;
     }
@@ -2961,7 +2961,7 @@ exports.aceInitialized = (h, ctx) => {
     // Need rep to be updated after text insertion to apply attributes correctly
     const currentRep = ed.ace_getRep(); // Get potentially updated rep
     if (!currentRep || !currentRep.lines) {
-        console.error(`[ep_tables5] ${funcName}: Could not get updated rep after text insertion. Cannot apply attributes reliably.`);
+        console.error(`[ep_data_tables] ${funcName}: Could not get updated rep after text insertion. Cannot apply attributes reliably.`);
         // log(`${funcName}: END - Error getting updated rep`);
         // Maybe attempt to continue without rep? Risky.
         return; 
@@ -3014,8 +3014,8 @@ exports.aceInitialized = (h, ctx) => {
       ed.ace_performSelectionChange(finalCaretPos, finalCaretPos, false);
        // log(`${funcName}: Successfully set caret position.`);
     } catch(e) {
-       console.error(`[ep_tables5] ${funcName}: Error setting caret position after table creation:`, e);
-       // log(`[ep_tables5] ${funcName}: Error details:`, { message: e.message, stack: e.stack });
+       console.error(`[ep_data_tables] ${funcName}: Error setting caret position after table creation:`, e);
+       // log(`[ep_data_tables] ${funcName}: Error details:`, { message: e.message, stack: e.stack });
     }
 
     // log(`${funcName}: END - Refactored Phase 4`);
@@ -3026,16 +3026,16 @@ exports.aceInitialized = (h, ctx) => {
     // log(`${funcName}: START - Processing action: ${action}`);
     
     // Get the last clicked cell info to determine which table to operate on
-    const editor = ed.ep_tables5_editor;
+    const editor = ed.ep_data_tables_editor;
     if (!editor) {
-      console.error(`[ep_tables5] ${funcName}: Could not get editor reference.`);
+      console.error(`[ep_data_tables] ${funcName}: Could not get editor reference.`);
       return;
     }
     
-    const lastClick = editor.ep_tables5_last_clicked;
+    const lastClick = editor.ep_data_tables_last_clicked;
     if (!lastClick || !lastClick.tblId) {
       // log(`${funcName}: No table selected. Please click on a table cell first.`);
-      console.warn('[ep_tables5] No table selected. Please click on a table cell first.');
+      console.warn('[ep_data_tables] No table selected. Please click on a table cell first.');
       return;
     }
     
@@ -3045,14 +3045,14 @@ exports.aceInitialized = (h, ctx) => {
       // Get current representation and document manager
       const currentRep = ed.ace_getRep();
       if (!currentRep || !currentRep.lines) {
-        console.error(`[ep_tables5] ${funcName}: Could not get current representation.`);
+        console.error(`[ep_data_tables] ${funcName}: Could not get current representation.`);
         return;
       }
       
       // Use the stored documentAttributeManager reference
-      const docManager = ed.ep_tables5_docManager;
+      const docManager = ed.ep_data_tables_docManager;
       if (!docManager) {
-        console.error(`[ep_tables5] ${funcName}: Could not get document attribute manager from stored reference.`);
+        console.error(`[ep_data_tables] ${funcName}: Could not get document attribute manager from stored reference.`);
         return;
       }
       
@@ -3214,14 +3214,14 @@ exports.aceInitialized = (h, ctx) => {
       }
       
       if (!success) {
-        console.error(`[ep_tables5] ${funcName}: Table operation failed for action: ${action}`);
+        console.error(`[ep_data_tables] ${funcName}: Table operation failed for action: ${action}`);
         return;
       }
       
       // log(`${funcName}: Table operation completed successfully with text and metadata synchronization`);
       
     } catch (error) {
-      console.error(`[ep_tables5] ${funcName}: Error during table operation:`, error);
+      console.error(`[ep_data_tables] ${funcName}: Error during table operation:`, error);
       // log(`${funcName}: Error details:`, { message: error.message, stack: error.stack });
     }
   };
@@ -3275,12 +3275,12 @@ exports.aceInitialized = (h, ctx) => {
                     columnWidths.push(100 / numCols);
                   }
                 });
-                // log('[ep_tables5] addTableRowAbove: Extracted column widths from DOM:', columnWidths);
+                // log('[ep_data_tables] addTableRowAbove: Extracted column widths from DOM:', columnWidths);
               }
             }
           }
         } catch (e) {
-          console.error('[ep_tables5] addTableRowAbove: Error extracting column widths from DOM:', e);
+          console.error('[ep_data_tables] addTableRowAbove: Error extracting column widths from DOM:', e);
         }
       }
       
@@ -3300,7 +3300,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error adding row above with text:', e);
+      console.error('[ep_data_tables] Error adding row above with text:', e);
       return false;
     }
   }
@@ -3353,12 +3353,12 @@ exports.aceInitialized = (h, ctx) => {
                     columnWidths.push(100 / numCols);
                   }
                 });
-                 // log('[ep_tables5] addTableRowBelow: Extracted column widths from DOM:', columnWidths);
+                 // log('[ep_data_tables] addTableRowBelow: Extracted column widths from DOM:', columnWidths);
               }
             }
           }
         } catch (e) {
-          console.error('[ep_tables5] addTableRowBelow: Error extracting column widths from DOM:', e);
+          console.error('[ep_data_tables] addTableRowBelow: Error extracting column widths from DOM:', e);
         }
       }
       
@@ -3378,7 +3378,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error adding row below with text:', e);
+      console.error('[ep_data_tables] Error adding row below with text:', e);
       return false;
     }
   }
@@ -3418,7 +3418,7 @@ exports.aceInitialized = (h, ctx) => {
             if (cellContent.length > 0) { // Only apply to non-empty cells
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-              // log(`[ep_tables5] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              // log(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -3433,7 +3433,7 @@ exports.aceInitialized = (h, ctx) => {
         const newColCount = tableLine.cols + 1;
         const equalWidth = 100 / newColCount;
         const normalizedWidths = Array(newColCount).fill(equalWidth);
-       // log(`[ep_tables5] addTableColumnLeft: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
+       // log(`[ep_data_tables] addTableColumnLeft: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
         
         // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
@@ -3444,7 +3444,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error adding column left with text:', e);
+      console.error('[ep_data_tables] Error adding column left with text:', e);
       return false;
     }
   }
@@ -3485,7 +3485,7 @@ exports.aceInitialized = (h, ctx) => {
             if (cellContent.length > 0) { // Only apply to non-empty cells
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-              // log(`[ep_tables5] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              // log(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -3500,7 +3500,7 @@ exports.aceInitialized = (h, ctx) => {
         const newColCount = tableLine.cols + 1;
         const equalWidth = 100 / newColCount;
         const normalizedWidths = Array(newColCount).fill(equalWidth);
-        // log(`[ep_tables5] addTableColumnRight: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
+        // log(`[ep_data_tables] addTableColumnRight: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
         
         // Apply updated metadata
         const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
@@ -3511,7 +3511,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error adding column right with text:', e);
+      console.error('[ep_data_tables] Error adding column right with text:', e);
       return false;
     }
   }
@@ -3523,7 +3523,7 @@ exports.aceInitialized = (h, ctx) => {
       // Special handling for deleting the first row (row index 0)
       // Insert a blank line to prevent the table from getting stuck at line 1
       if (targetRowIndex === 0) {
-        // log('[ep_tables5] Deleting first row (row 0) - inserting blank line to prevent table from getting stuck');
+        // log('[ep_data_tables] Deleting first row (row 0) - inserting blank line to prevent table from getting stuck');
         const insertStart = [targetLine.lineIndex, 0];
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertStart, '\n');
         
@@ -3563,7 +3563,7 @@ exports.aceInitialized = (h, ctx) => {
                         columnWidths.push(100 / targetLine.metadata.cols);
                       }
                     });
-                    // log('[ep_tables5] deleteTableRow: Extracted column widths from DOM:', columnWidths);
+                    // log('[ep_data_tables] deleteTableRow: Extracted column widths from DOM:', columnWidths);
                     break;
                   }
                 }
@@ -3571,7 +3571,7 @@ exports.aceInitialized = (h, ctx) => {
             }
           }
         } catch (e) {
-          console.error('[ep_tables5] deleteTableRow: Error extracting column widths from DOM:', e);
+          console.error('[ep_data_tables] deleteTableRow: Error extracting column widths from DOM:', e);
         }
       }
       
@@ -3587,7 +3587,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error deleting row with text:', e);
+      console.error('[ep_data_tables] Error deleting row with text:', e);
       return false;
     }
   }
@@ -3600,7 +3600,7 @@ exports.aceInitialized = (h, ctx) => {
         const cells = lineText.split(DELIMITER);
         
         if (targetColIndex >= cells.length) {
-          // log(`[ep_tables5] Warning: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
+          // log(`[ep_data_tables] Warning: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
           continue;
         }
         
@@ -3625,7 +3625,7 @@ exports.aceInitialized = (h, ctx) => {
           deleteStart -= DELIMITER.length;
         }
         
-        // log(`[ep_tables5] Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd} from "${lineText}"`);
+        // log(`[ep_data_tables] Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd} from "${lineText}"`);
         
         // Perform the precise deletion
         const rangeStart = [tableLine.lineIndex, deleteStart];
@@ -3639,7 +3639,7 @@ exports.aceInitialized = (h, ctx) => {
         if (newColCount > 0) {
           const equalWidth = 100 / newColCount;
           const normalizedWidths = Array(newColCount).fill(equalWidth);
-          // log(`[ep_tables5] deleteTableColumn: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
+          // log(`[ep_data_tables] deleteTableColumn: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
         
         // Update metadata
           const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
@@ -3650,7 +3650,7 @@ exports.aceInitialized = (h, ctx) => {
       editorInfo.ace_fastIncorp(10);
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error deleting column with text:', e);
+      console.error('[ep_data_tables] Error deleting column with text:', e);
       return false;
     }
   }
@@ -3666,7 +3666,7 @@ exports.aceEndLineAndCharForPoint   = () => { return undefined; };
 
 // NEW: Style protection for table cells
 exports.aceSetAuthorStyle = (hook, ctx) => {
-  const logPrefix = '[ep_tables5:aceSetAuthorStyle]';
+  const logPrefix = '[ep_data_tables:aceSetAuthorStyle]';
   // log(`${logPrefix} START`, { hook, ctx });
 
   // If no selection or no style to apply, allow default
@@ -3758,7 +3758,7 @@ exports.aceSetAuthorStyle = (hook, ctx) => {
 exports.aceEditorCSS                = () => { 
   // Path relative to Etherpad's static/plugins/ directory
   // Format should be: pluginName/path/to/file.css
-  return ['ep_tables5/static/css/datatables-editor.css', 'ep_tables5/static/css/caret.css'];
+  return ['ep_data_tables/static/css/datatables-editor.css', 'ep_data_tables/static/css/caret.css'];
 };
 
 // Register TABLE as a block element, hoping it influences rendering behavior
@@ -3802,7 +3802,7 @@ const createResizeOverlay = (table, columnIndex) => {
   // Get all the necessary container references like image plugin
   const $innerIframe = $('iframe[name="ace_outer"]').contents().find('iframe[name="ace_inner"]');
   if ($innerIframe.length === 0) {
-    console.error('[ep_tables5] createResizeOverlay: Could not find inner iframe');
+    console.error('[ep_data_tables] createResizeOverlay: Could not find inner iframe');
     return;
   }
 
@@ -3810,20 +3810,20 @@ const createResizeOverlay = (table, columnIndex) => {
   const padOuter = $('iframe[name="ace_outer"]').contents().find('body');
   
   if (!innerDocBody || padOuter.length === 0) {
-    console.error('[ep_tables5] createResizeOverlay: Could not find required container elements');
+    console.error('[ep_data_tables] createResizeOverlay: Could not find required container elements');
           return;
       }
 
   // Find all tables that belong to the same table (same tblId)
   const tblId = table.getAttribute('data-tblId');
   if (!tblId) {
-    console.error('[ep_tables5] createResizeOverlay: No tblId found on table');
+    console.error('[ep_data_tables] createResizeOverlay: No tblId found on table');
     return;
   }
   
   const allTableRows = innerDocBody.querySelectorAll(`table.dataTable[data-tblId="${tblId}"]`);
   if (allTableRows.length === 0) {
-    console.error('[ep_tables5] createResizeOverlay: No table rows found for tblId:', tblId);
+    console.error('[ep_data_tables] createResizeOverlay: No table rows found for tblId:', tblId);
     return;
   }
   
@@ -3862,7 +3862,7 @@ const createResizeOverlay = (table, columnIndex) => {
     scrollTopOuter = padOuter.scrollTop();
     scrollLeftOuter = padOuter.scrollLeft();
   } catch (e) {
-    console.error('[ep_tables5] createResizeOverlay: Error getting container rects/scrolls:', e);
+    console.error('[ep_data_tables] createResizeOverlay: Error getting container rects/scrolls:', e);
     return;
   }
   
@@ -4173,7 +4173,7 @@ const finishColumnResize = (editorInfo, docManager) => {
 
 // NEW: Undo/Redo protection
 exports.aceUndoRedo = (hook, ctx) => {
-  const logPrefix = '[ep_tables5:aceUndoRedo]';
+  const logPrefix = '[ep_data_tables:aceUndoRedo]';
   // log(`${logPrefix} START`, { hook, ctx });
 
   if (!ctx || !ctx.rep || !ctx.rep.selStart || !ctx.rep.selEnd) {
@@ -4243,7 +4243,7 @@ exports.aceUndoRedo = (hook, ctx) => {
 
 // *** ADDED: postAceInit hook for attaching listeners ***
 exports.postAceInit = (hookName, ctx) => {
-  const func = '[ep_tables5:postAceInit]';
+  const func = '[ep_data_tables:postAceInit]';
   // log(`${func} START`);
   const editorInfo = ctx.ace; // Get editorInfo from context
 
@@ -4258,15 +4258,15 @@ exports.postAceInit = (hookName, ctx) => {
       const socket = padObj && padObj.socket;
       if (!socket) return false; // Not ready yet
 
-      if (socket.ep_tables5_reconnect_listener_attached) return true;
+      if (socket.ep_data_tables_reconnect_listener_attached) return true;
 
       let triggered = false;
       const triggerHardReconnect = (evtName) => {
         if (triggered) return;
         triggered = true;
-        console.log(`[ep_tables5] Socket.IO event '${evtName}' – invoking pad.forceReconnect()`);
+        console.log(`[ep_data_tables] Socket.IO event '${evtName}' – invoking pad.forceReconnect()`);
         if (window.pad && typeof window.pad.forceReconnect === 'function') {
-          try { window.pad.forceReconnect(); } catch(e) { console.error('[ep_tables5] pad.forceReconnect() failed', e); window.location.reload(); }
+          try { window.pad.forceReconnect(); } catch(e) { console.error('[ep_data_tables] pad.forceReconnect() failed', e); window.location.reload(); }
         } else {
           window.location.reload();
         }
@@ -4277,11 +4277,11 @@ exports.postAceInit = (hookName, ctx) => {
       socket.on('connect', () => { if (socket.disconnectedPreviously) triggerHardReconnect('connect'); });
       socket.on('disconnect', () => { socket.disconnectedPreviously = true; });
 
-      socket.ep_tables5_reconnect_listener_attached = true;
-      console.log('[ep_tables5] Reconnect handler fully attached to pad.socket');
+      socket.ep_data_tables_reconnect_listener_attached = true;
+      console.log('[ep_data_tables] Reconnect handler fully attached to pad.socket');
       return true;
     } catch (e) {
-      console.error('[ep_tables5] Error attaching reconnect listener:', e);
+      console.error('[ep_data_tables] Error attaching reconnect listener:', e);
       return false;
     }
   };
@@ -4306,16 +4306,16 @@ exports.postAceInit = (hookName, ctx) => {
       // log(`${func} Inside callWithAce for attaching mousedown listeners.`);
 
       // Initialize shared state on the editor object
-      if (!editor.ep_tables5_last_clicked) {
-          editor.ep_tables5_last_clicked = null;
-          // log(`${func} Initialized ace.editor.ep_tables5_last_clicked`);
+      if (!editor.ep_data_tables_last_clicked) {
+          editor.ep_data_tables_last_clicked = null;
+          // log(`${func} Initialized ace.editor.ep_data_tables_last_clicked`);
       }
 
       // log(`${func} Attempting to attach mousedown listener to editor container for cell selection...`);
 
       inner.addEventListener('mousedown', (evt) => {
           const target = evt.target;
-          const mousedownFuncName = '[ep_tables5 mousedown]';
+          const mousedownFuncName = '[ep_data_tables mousedown]';
           // log(`${mousedownFuncName} RAW MOUSE DOWN detected. Target:`, target);
           // log(`${mousedownFuncName} Target tagName: ${target.tagName}`);
           // log(`${mousedownFuncName} Target className: ${target.className}`);
@@ -4368,11 +4368,11 @@ exports.postAceInit = (hookName, ctx) => {
           }
 
           // Clear previous selection state regardless of where click happened
-          if (editor.ep_tables5_last_clicked) {
+          if (editor.ep_data_tables_last_clicked) {
               // log(`${mousedownFuncName} Clearing previous selection info.`);
               // TODO: Add visual class removal if needed
           }
-          editor.ep_tables5_last_clicked = null; // Clear state first
+          editor.ep_data_tables_last_clicked = null; // Clear state first
 
           if (clickedTD && clickedTR && clickedTable) {
               // log(`${mousedownFuncName} Click detected inside table.dataTable td.`);
@@ -4399,12 +4399,12 @@ exports.postAceInit = (hookName, ctx) => {
                            // Store the accurately determined cell info
                            // Initialize relative position - might be refined later if needed
                            const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
-                           editor.ep_tables5_last_clicked = clickInfo;
+                           editor.ep_data_tables_last_clicked = clickInfo;
                            // log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
 
                            // --- NEW: Jump caret immediately for snappier UX ---
                            try {
-                             const docMgr = ace.ep_tables5_docManager;
+                             const docMgr = ace.ep_data_tables_docManager;
                              if (docMgr && typeof navigateToCell === 'function') {
                                const navOk = navigateToCell(lineNum, cellIndex, ace, docMgr);
                                // log(`${mousedownFuncName} Immediate navigateToCell result: ${navOk}`);
@@ -4425,7 +4425,7 @@ exports.postAceInit = (hookName, ctx) => {
               } catch (e) {
                   console.error(`${mousedownFuncName} Error processing table cell click:`, e);
                   // log(`${mousedownFuncName} Error details:`, { message: e.message, stack: e.stack });
-                  editor.ep_tables5_last_clicked = null; // Ensure state is clear on error
+                  editor.ep_data_tables_last_clicked = null; // Ensure state is clear on error
               }
           } else {
                // log(`${mousedownFuncName} Click was outside a table.dataTable td.`);

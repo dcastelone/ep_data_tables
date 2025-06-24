@@ -3,26 +3,24 @@
 	  {
 		"name": "tables",
   		"hooks": {
-		  "eejsBlock_styles"           : "ep_tables5/static/js/index:eejsBlock_styles",
-		  "eejsBlock_scripts"          : "ep_tables5/static/js/index:eejsBlock_scripts",
-		  "eejsBlock_editbarMenuLeft"  : "ep_tables5/static/js/index:eejsBlock_editbarMenuLeft",
-		  "getLineHTMLForExport"       : "ep_tables5/export2html:getLineHTMLForExport",
-      "import"                     : "ep_tables5/tableImport:import",
-      "collectContentPre"          : "ep_tables5/collectContentPre:collectContentPre" 
+		  "eejsBlock_styles"           : "ep_data_tables/static/js/index:eejsBlock_styles",
+		  "eejsBlock_scripts"          : "ep_data_tables/static/js/index:eejsBlock_scripts",
+		  "eejsBlock_editbarMenuLeft"  : "ep_data_tables/static/js/index:eejsBlock_editbarMenuLeft",
+      "collectContentPre"          : "ep_data_tables/collectContentPre:collectContentPre" 
 		},
   		"client_hooks": {
-		  "collectContentPre"      : "ep_tables5/static/js/client_hooks:collectContentPre",
-		  "collectContentLineBreak": "ep_tables5/static/js/collector_hooks:collectContentLineBreak",
-		  "collectContentLineText" : "ep_tables5/static/js/collector_hooks:collectContentLineText",
-		  "aceKeyEvent"                 : "ep_tables5/static/js/client_hooks:aceKeyEvent",
-		  "aceStartLineAndCharForPoint" : "ep_tables5/static/js/client_hooks:aceStartLineAndCharForPoint",
-		  "aceEndLineAndCharForPoint"   : "ep_tables5/static/js/client_hooks:aceEndLineAndCharForPoint",
-		  "aceAttribsToClasses"         : "ep_tables5/static/js/client_hooks:aceAttribsToClasses",
-		  "acePostWriteDomLineHTML" : "ep_tables5/static/js/client_hooks:acePostWriteDomLineHTML",
-		  "aceInitialized"              : "ep_tables5/static/js/client_hooks:aceInitialized",
-		  "aceSetAuthorStyle"           : "ep_tables5/static/js/client_hooks:aceSetAuthorStyle",
-		  "aceEditorCSS"                : "ep_tables5/static/js/client_hooks:aceEditorCSS",
-  		  "postAceInit" : 	"ep_tables5/static/js/initialisation:postAceInit"
+		  "collectContentPre"      : "ep_data_tables/static/js/client_hooks:collectContentPre",
+		  "collectContentLineBreak": "ep_data_tables/static/js/collector_hooks:collectContentLineBreak",
+		  "collectContentLineText" : "ep_data_tables/static/js/collector_hooks:collectContentLineText",
+		  "aceKeyEvent"                 : "ep_data_tables/static/js/client_hooks:aceKeyEvent",
+		  "aceStartLineAndCharForPoint" : "ep_data_tables/static/js/client_hooks:aceStartLineAndCharForPoint",
+		  "aceEndLineAndCharForPoint"   : "ep_data_tables/static/js/client_hooks:aceEndLineAndCharForPoint",
+		  "aceAttribsToClasses"         : "ep_data_tables/static/js/client_hooks:aceAttribsToClasses",
+		  "acePostWriteDomLineHTML" : "ep_data_tables/static/js/client_hooks:acePostWriteDomLineHTML",
+		  "aceInitialized"              : "ep_data_tables/static/js/client_hooks:aceInitialized",
+		  "aceSetAuthorStyle"           : "ep_data_tables/static/js/client_hooks:aceSetAuthorStyle",
+		  "aceEditorCSS"                : "ep_data_tables/static/js/client_hooks:aceEditorCSS",
+  		  "postAceInit" : 	"ep_data_tables/static/js/initialisation:postAceInit"
 		}
 	  }
 	]

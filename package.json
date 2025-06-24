@@ -1,29 +1,28 @@
 {
-  "name": "ep_tables5",
-  "version": "0.2.0",
+  "name": "ep_data_tables",
+  "version": "0.0.5",
   "description": "etherpad table plugin",
   "author": {
-    "name": "cuishijie",
-    "email": "1839333350@qq.com",
-    "github": "https://github.com/csj5588"
+    "name": "DCastelone",
+    "url": "https://github.com/dcastelone"
   },
-  "contributors": [
-    ""
-  ],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "etherpad",
     "plugin",
-    "ep"
+    "ep",
+    "tables",
+    "data",
+    "tables"
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/csj5588/ep_tables5.git"
+    "url": "https://github.com/csj5588/ep_data_tables.git"
   },
   "bugs": {
-    "url": "https://github.com/csj5588/ep_tables5/issues"
+    "url": "https://github.com/csj5588/ep_data_tables/issues"
   },
-  "homepage": "https://github.com/csj5588/ep_tables5/README.md",
+  "homepage": "https://github.com/csj5588/ep_data_tables/README.md",
   "funding": {
     "type": "individual",
     "url": "https://etherpad.org/"

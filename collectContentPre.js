@@ -1,7 +1,7 @@
 'use strict';
 
 // Using console.log for server-side logging, similar to other Etherpad server-side files.
-const log = (...m) => console.log('[ep_tables5:collectContentPre_SERVER]', ...m);
+const log = (...m) => console.log('[ep_data_tables:collectContentPre_SERVER]', ...m);
 
 // Base64 decoding function (copied from tableImport.js / client_hooks.js for server-side use)
 // Ensure it can handle the URL-safe variant if that's what tableImport.js produces.

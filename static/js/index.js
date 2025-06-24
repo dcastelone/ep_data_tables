@@ -1,13 +1,13 @@
-// index.js – server-side EEJS injections for ep_tables5
+// index.js – server-side EEJS injections for ep_data_tables
 const eejs = require('ep_etherpad-lite/node/eejs/');
 
-const log = (...m) => console.debug('[ep_tables5:index]', ...m);
+const log = (...m) => console.debug('[ep_data_tables:index]', ...m);
 log('Loading EEJS templates...');
 
-const scriptsTag        = eejs.require('ep_tables5/templates/datatablesScripts.ejs');
-const editbarButtonsTag = eejs.require('ep_tables5/templates/datatablesEditbarButtons.ejs');
-const styleTag          = eejs.require('ep_tables5/templates/styles.ejs'); // Optional base styles
-// const timesliderTag  = eejs.require('ep_tables5/templates/datatablesScriptsTimeslider.ejs'); // optional
+const scriptsTag        = eejs.require('ep_data_tables/templates/datatablesScripts.ejs');
+const editbarButtonsTag = eejs.require('ep_data_tables/templates/datatablesEditbarButtons.ejs');
+const styleTag          = eejs.require('ep_data_tables/templates/styles.ejs'); // Optional base styles
+// const timesliderTag  = eejs.require('ep_data_tables/templates/datatablesScriptsTimeslider.ejs'); // optional
 log('EEJS templates loaded.');
 
 exports.eejsBlock_scripts = (_hook, args) => {
@@ -37,7 +37,7 @@ exports.eejsBlock_styles = (_hook, args) => {
 
 exports.eejsBlock_timesliderScripts = (_hook, args) => {
   log('eejsBlock_timesliderScripts: START');
-  args.content +='<script src="/static/plugins/ep_tables5/static/js/datatables-renderer.js"></script>';
+  args.content +='<script src="/static/plugins/ep_data_tables/static/js/datatables-renderer.js"></script>';
   log('eejsBlock_timesliderScripts: Appended timesliderTag.');
   log('eejsBlock_timesliderScripts: END');
 };

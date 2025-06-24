@@ -1,4 +1,4 @@
-/* ep_tables5 – datatables-renderer.js
+/* ep_data_tables – datatables-renderer.js
  *
  * Only used by:
  *   • export pipeline           (`context === "export"`)
@@ -6,7 +6,7 @@
  * Regular pad rendering is done by client_hooks.js.
  */
 
-const log = (...m) => console.debug('[ep_tables5:datatables-renderer]', ...m);
+const log = (...m) => console.debug('[ep_data_tables:datatables-renderer]', ...m);
 const DELIMITER = '|'; // Used for splitting cell content if ever needed by legacy, export now receives pre-split, pre-rendered cells
 
 // buildExportHtml now expects an array of pre-rendered HTML strings for each cell.
@@ -127,7 +127,7 @@ if (typeof DatatablesRenderer === 'undefined') {
               log('render: Parsed JSON successfully for legacy path:', row);
             } catch (e) {
               log('render: ERROR - Failed to parse JSON from text for legacy path:', e);
-              console.error('[ep_tables5:datatables-renderer] Failed to parse JSON (legacy path):', txt, e);
+              console.error('[ep_data_tables:datatables-renderer] Failed to parse JSON (legacy path):', txt, e);
               return; 
             }
           }
