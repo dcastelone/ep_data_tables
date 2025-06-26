@@ -463,19 +463,19 @@ exports.collectContentPre = (hook, ctx) => {
         let segmentHTML = td.innerHTML || '';
                   // log(`${funcName}: Line ${lineNum} TD[${index}] raw innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
                   
-                  const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
+                  const resizeHandleRegex = /<div class="ep-data_tables-resize-handle"[^>]*><\/div>/ig;
                   segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
                   // NEW: Also remove any previously injected hidden delimiter span so we do
                   // not serialise it back into the atext. Leaving it in would duplicate the
                   // hidden span on every save-reload cycle and, more importantly, confuse the
                   // later HTML-to-table reconstruction because the delimiter that lives *inside*
                   // the span would be mistaken for a real cell boundary.
-                  const hiddenDelimRegexPrimary = /<span class="ep-tables5-delim"[^>]*>.*?<\/span>/ig;
+                  const hiddenDelimRegexPrimary = /<span class="ep-data_tables-delim"[^>]*>.*?<\/span>/ig;
                   segmentHTML = segmentHTML.replace(hiddenDelimRegexPrimary, '');
 
         const hidden = index === 0 ? '' :
         /* keep the char in the DOM but make it visually disappear and non-editable */
-        `<span class="ep-tables5-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
+        `<span class="ep-data_tables-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
                   // log(`${funcName}: Line ${lineNum} TD[${index}] cleaned innerHTML (first 100): "${segmentHTML.substring(0,100)}"`);
         return segmentHTML;
       });
@@ -517,10 +517,10 @@ exports.collectContentPre = (hook, ctx) => {
                 
                 let cellHTMLSegments = Array.from(trNode.children).map((td, index) => {
                   let segmentHTML = td.innerHTML || '';
-                  const resizeHandleRegex = /<div class="ep-tables5-resize-handle"[^>]*><\/div>/ig;
+                  const resizeHandleRegex = /<div class="ep-data_tables-resize-handle"[^>]*><\/div>/ig;
                   segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
                   if (index > 0) {
-                    const hiddenDelimRegex = new RegExp(`^<span class="ep-tables5-delim" contenteditable="false">${DELIMITER}(<\\/span>)?<\\/span>`, 'i');
+                    const hiddenDelimRegex = new RegExp(`^<span class="ep-data_tables-delim" contenteditable="false">${DELIMITER}(<\\/span>)?<\\/span>`, 'i');
                     segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
                   }
                   return segmentHTML;
@@ -678,7 +678,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     // cannot sit between delimiter and text.
     let modifiedSegment = segment || '&nbsp;';
     if (index > 0) {
-      const delimSpan = `<span class="ep-tables5-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
+      const delimSpan = `<span class="ep-data_tables-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
       // If the rendered segment already starts with a <span …> (which will be
       // the usual author-colour wrapper) inject the delimiter right after that
       // opening tag; otherwise just prefix it.
@@ -687,7 +687,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     }
 
     // --- NEW: Always embed the invisible caret-anchor as *last* child *within* the first author span ---
-    const caretAnchorSpan = '<span class="ep-tables5-caret-anchor" contenteditable="false"></span>';
+    const caretAnchorSpan = '<span class="ep-data_tables-caret-anchor" contenteditable="false"></span>';
     const anchorInjected = modifiedSegment.replace(/<\/span>\s*$/i, `${caretAnchorSpan}</span>`);
     modifiedSegment = (anchorInjected !== modifiedSegment) ? anchorInjected : `${modifiedSegment}${caretAnchorSpan}`;
 
@@ -697,7 +697,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
 
     const isLastColumn = index === innerHTMLSegments.length - 1;
     const resizeHandle = !isLastColumn ? 
-      `<div class="ep-tables5-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
+      `<div class="ep-data_tables-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
 
     const tdContent = `<td style="${cellStyle}" data-column="${index}" draggable="false">${modifiedSegment}${resizeHandle}</td>`;
     return tdContent;
@@ -921,7 +921,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // NEW: Remove all hidden-delimiter <span> wrappers **before** we split so
   // the embedded delimiter character they carry doesn't inflate or shrink
   // the segment count.
-  const spanDelimRegex = new RegExp('<span class="ep-tables5-delim"[^>]*>' + DELIMITER + '<\\/span>', 'ig');
+  const spanDelimRegex = new RegExp('<span class="ep-data_tables-delim"[^>]*>' + DELIMITER + '<\\/span>', 'ig');
   const sanitizedHTMLForSplit = (delimitedTextFromLine || '').replace(spanDelimRegex, '');
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
   
@@ -2578,7 +2578,7 @@ exports.aceInitialized = (h, ctx) => {
     // log(`${callWithAceLogPrefix} Found iframe documents: outer=${outerDoc.length}, inner=${innerDoc.length}`);
     
     // Mousedown on resize handles
-    $inner.on('mousedown', '.ep-tables5-resize-handle', (evt) => {
+    $inner.on('mousedown', '.ep-data_tables-resize-handle', (evt) => {
       const resizeLogPrefix = '[ep_data_tables:resizeMousedown]';
       // log(`${resizeLogPrefix} Resize handle mousedown detected`);
       
@@ -3904,7 +3904,7 @@ const createResizeOverlay = (table, columnIndex) => {
   
   // Create overlay container (invisible background) that spans the entire table height
   resizeOverlay = document.createElement('div');
-  resizeOverlay.className = 'ep-tables5-resize-overlay';
+  resizeOverlay.className = 'ep-data_tables-resize-overlay';
   resizeOverlay.style.cssText = `
     position: absolute;
     left: ${finalOverlayLeft}px;
@@ -4322,7 +4322,7 @@ exports.postAceInit = (hookName, ctx) => {
           // log(`${mousedownFuncName} Target ID: ${target.id}`);
 
           // Don't interfere with resize handle clicks
-          if (target.classList && target.classList.contains('ep-tables5-resize-handle')) {
+          if (target.classList && target.classList.contains('ep-data_tables-resize-handle')) {
             // log(`${mousedownFuncName} Click on resize handle, skipping cell selection logic.`);
             return;
           }

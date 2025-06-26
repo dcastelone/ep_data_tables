@@ -1,7 +1,7 @@
 {
   "name": "ep_data_tables",
-  "version": "0.0.5",
-  "description": "etherpad table plugin",
+  "version": "0.0.1",
+  "description": "BETA - etherpad tables plugin, compatible with other character/line based styling and other features",
   "author": {
     "name": "DCastelone",
     "url": "https://github.com/dcastelone"
@@ -17,16 +17,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/csj5588/ep_data_tables.git"
+    "url": "https://github.com/dcastelone/ep_data_tables.git"
   },
   "bugs": {
-    "url": "https://github.com/csj5588/ep_data_tables/issues"
+    "url": "https://github.com/dcastelone/ep_data_tables/issues"
   },
-  "homepage": "https://github.com/csj5588/ep_data_tables/README.md",
-  "funding": {
-    "type": "individual",
-    "url": "https://etherpad.org/"
-  },
+  "homepage": "https://github.com/dcastelone/ep_data_tables/README.md",
   "devDependencies": {
     "eslint": "^7.18.0",
     "eslint-config-etherpad": "^1.0.24",
@@ -47,6 +43,5 @@
   },
   "engines": {
     "node": ">= 10.13.0"
-  },
-  "gitHead": "76641032dedc317ca62ef5e6f101f1c7fc92a37d"
+  }
 }

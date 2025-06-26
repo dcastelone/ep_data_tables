@@ -90,7 +90,7 @@
 } 
 
 /* Hide the injected delimiter span */
-.ep-tables5-delim {
+.ep-data_tables-delim {
   font-size:0;
   line-height:0;
   color:transparent;
@@ -100,7 +100,7 @@
 } 
 
 /* NEW: Column resize handle styles */
-.ep-tables5-resize-handle {
+.ep-data_tables-resize-handle {
   position: absolute;
   top: 0;
   right: -2px;
@@ -116,14 +116,14 @@
 
 
 /* Show resize handles on hover */
-.dataTable tr:first-child td:hover .ep-tables5-resize-handle,
-.dataTable tr:first-child .ep-tables5-resize-handle:hover {
+.dataTable tr:first-child td:hover .ep-data_tables-resize-handle,
+.dataTable tr:first-child .ep-data_tables-resize-handle:hover {
   opacity: 0.3;
   background: #007cff;
 }
 
 /* Visual feedback during resize */
-.dataTable.ep-tables5-resizing {
+.dataTable.ep-data_tables-resizing {
   user-select: none;
   -webkit-user-select: none;
   -moz-user-select: none;
@@ -131,12 +131,12 @@
   pointer-events: none; /* Prevent other interactions during resize */
 }
 
-.dataTable.ep-tables5-resizing td {
+.dataTable.ep-data_tables-resizing td {
   transition: none !important;
   pointer-events: none; /* Prevent cell interactions during resize */
 }
 
-.dataTable.ep-tables5-resizing .ep-tables5-resize-handle {
+.dataTable.ep-data_tables-resizing .ep-data_tables-resize-handle {
   opacity: 0.7 !important;
   background: #007cff !important;
   pointer-events: auto; /* Keep resize handle interactive */
@@ -148,13 +148,13 @@
 }
 
 /* Ensure resize handles don't interfere with text selection */
-.ep-tables5-resize-handle:hover {
+.ep-data_tables-resize-handle:hover {
   background: #007cff !important;
   opacity: 0.5 !important;
 }
 
 /* Add a visual indicator during resize */
-.dataTable.ep-tables5-resizing::after {
+.dataTable.ep-data_tables-resizing::after {
   content: '';
   position: absolute;
   top: 0;
