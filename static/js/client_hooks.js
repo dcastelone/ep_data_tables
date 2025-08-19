@@ -472,6 +472,12 @@ exports.collectContentPre = (hook, ctx) => {
                   // the span would be mistaken for a real cell boundary.
                   const hiddenDelimRegexPrimary = /<span class="ep-data_tables-delim"[^>]*>.*?<\/span>/ig;
                   segmentHTML = segmentHTML.replace(hiddenDelimRegexPrimary, '');
+                  // Remove caret-anchor spans (invisible, non-semantic)
+                  const caretAnchorRegex = /<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig;
+                  segmentHTML = segmentHTML.replace(caretAnchorRegex, '');
+                  // If, after stripping tags/entities, the content is empty, serialize as empty string
+                  const textCheck = segmentHTML.replace(/<[^>]*>/g, '').replace(/&nbsp;/ig, ' ').trim();
+                  if (textCheck === '') segmentHTML = '';
 
         const hidden = index === 0 ? '' :
         /* keep the char in the DOM but make it visually disappear and non-editable */
@@ -482,7 +488,7 @@ exports.collectContentPre = (hook, ctx) => {
 
       if (cellHTMLSegments.length !== existingMetadata.cols) {
                     // log(`${funcName}: WARNING Line ${lineNum}: Reconstructed cell count (${cellHTMLSegments.length}) does not match metadata cols (${existingMetadata.cols}). Padding/truncating.`);
-        while (cellHTMLSegments.length < existingMetadata.cols) cellHTMLSegments.push('&nbsp;');
+        while (cellHTMLSegments.length < existingMetadata.cols) cellHTMLSegments.push('');
                     if (cellHTMLSegments.length > existingMetadata.cols) cellHTMLSegments.length = existingMetadata.cols;
                 }
 
@@ -520,15 +526,21 @@ exports.collectContentPre = (hook, ctx) => {
                   const resizeHandleRegex = /<div class="ep-data_tables-resize-handle"[^>]*><\/div>/ig;
                   segmentHTML = segmentHTML.replace(resizeHandleRegex, '');
                   if (index > 0) {
-                    const hiddenDelimRegex = new RegExp(`^<span class="ep-data_tables-delim" contenteditable="false">${DELIMITER}(<\\/span>)?<\\/span>`, 'i');
+                    const hiddenDelimRegex = new RegExp('^<span class="ep-data_tables-delim" contenteditable="false">' + DELIMITER + '(<\\/span>)?<\\/span>', 'i');
                     segmentHTML = segmentHTML.replace(hiddenDelimRegex, '');
                   }
+                  // Remove caret-anchor spans (invisible, non-semantic)
+                  const caretAnchorRegex = /<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig;
+                  segmentHTML = segmentHTML.replace(caretAnchorRegex, '');
+                  // If, after stripping tags/entities, the content is empty, serialize as empty string
+                  const textCheck = segmentHTML.replace(/<[^>]*>/g, '').replace(/&nbsp;/ig, ' ').trim();
+                  if (textCheck === '') segmentHTML = '';
                   return segmentHTML;
                 });
                 
                 if (cellHTMLSegments.length !== domCols) {
                      // log(`${funcName}: WARNING Line ${lineNum} (Fallback): Reconstructed cell count (${cellHTMLSegments.length}) does not match DOM cols (${domCols}).`);
-                     while(cellHTMLSegments.length < domCols) cellHTMLSegments.push('&nbsp;');
+                     while(cellHTMLSegments.length < domCols) cellHTMLSegments.push('');
                      if(cellHTMLSegments.length > domCols) cellHTMLSegments.length = domCols;
                 }
 
@@ -672,24 +684,41 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   // Basic styling - can be moved to CSS later
   const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000; position: relative;`; // Added position: relative
 
+  // Precompute encoded tbljson class so empty cells can carry the same marker
+  let encodedTbljsonClass = '';
+  try {
+    encodedTbljsonClass = `tbljson-${enc(JSON.stringify(metadata))}`;
+  } catch (_) { encodedTbljsonClass = ''; }
+
   // Map the HTML segments directly into TD elements with column widths
   const cellsHtml = innerHTMLSegments.map((segment, index) => {
     // Build the hidden delimiter *inside* the first author span so the caret
-    // cannot sit between delimiter and text.
-    let modifiedSegment = segment || '&nbsp;';
+    // cannot sit between delimiter and text. For empty cells, synthesize a span
+    // that carries tbljson and tblCell-N so caret anchoring remains stable.
+    const textOnly = (segment || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/ig, ' ').trim();
+    let modifiedSegment = segment || '';
+    const isEmpty = !segment || textOnly === '';
+    if (isEmpty) {
+      const cellClass = encodedTbljsonClass ? `${encodedTbljsonClass} tblCell-${index}` : `tblCell-${index}`;
+      modifiedSegment = `<span class="${cellClass}">&nbsp;</span>`;
+    }
     if (index > 0) {
       const delimSpan = `<span class="ep-data_tables-delim" contenteditable="false">${HIDDEN_DELIM}</span>`;
       // If the rendered segment already starts with a <span …> (which will be
       // the usual author-colour wrapper) inject the delimiter right after that
       // opening tag; otherwise just prefix it.
       modifiedSegment = modifiedSegment.replace(/^(<span[^>]*>)/i, `$1${delimSpan}`);
-      if (modifiedSegment === segment) modifiedSegment = `${delimSpan}${modifiedSegment}`;
+      if (!/^<span[^>]*>/i.test(modifiedSegment)) modifiedSegment = `${delimSpan}${modifiedSegment}`;
     }
 
-    // --- NEW: Always embed the invisible caret-anchor as *last* child *within* the first author span ---
+    // --- NEW: Always embed the invisible caret-anchor as *last* child *within* the first span ---
     const caretAnchorSpan = '<span class="ep-data_tables-caret-anchor" contenteditable="false"></span>';
     const anchorInjected = modifiedSegment.replace(/<\/span>\s*$/i, `${caretAnchorSpan}</span>`);
-    modifiedSegment = (anchorInjected !== modifiedSegment) ? anchorInjected : `${modifiedSegment}${caretAnchorSpan}`;
+    modifiedSegment = (anchorInjected !== modifiedSegment)
+      ? anchorInjected
+      : (isEmpty
+          ? `<span class="${encodedTbljsonClass ? `${encodedTbljsonClass} ` : ''}tblCell-${index}">${modifiedSegment}${caretAnchorSpan}</span>`
+          : `${modifiedSegment}${caretAnchorSpan}`);
 
     // Width & other decorations remain unchanged
     const widthPercent = columnWidths[index] || (100 / numCols);
@@ -922,7 +951,10 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // the embedded delimiter character they carry doesn't inflate or shrink
   // the segment count.
   const spanDelimRegex = new RegExp('<span class="ep-data_tables-delim"[^>]*>' + DELIMITER + '<\\/span>', 'ig');
-  const sanitizedHTMLForSplit = (delimitedTextFromLine || '').replace(spanDelimRegex, '');
+  const sanitizedHTMLForSplit = (delimitedTextFromLine || '')
+    .replace(spanDelimRegex, '')
+    // strip caret anchors from raw line html before split
+    .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '');
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
   
   // log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT ANALYSIS ***`);
@@ -949,57 +981,83 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   let finalHtmlSegments = htmlSegments;
   
   if (htmlSegments.length !== rowMetadata.cols) {
-      // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED ***`);
-      // log(`${logPrefix} NodeID#${nodeId}: WARNING - Parsed segment count (${htmlSegments.length}) does not match metadata cols (${rowMetadata.cols}). Auto-reconstructing table structure.`);
-      console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Parsed segment count (${htmlSegments.length}) mismatch with metadata cols (${rowMetadata.cols}). Segments:`, htmlSegments);
-      
-      // *** ENHANCED DEBUG: Analyze why we have a mismatch ***
-      // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH ANALYSIS ***`);
-      // log(`${logPrefix} NodeID#${nodeId}: Expected columns: ${rowMetadata.cols}`);
-      // log(`${logPrefix} NodeID#${nodeId}: Actual segments: ${htmlSegments.length}`);
-      // log(`${logPrefix} NodeID#${nodeId}: Delimiter count found: ${delimiterCount}`);
-      // log(`${logPrefix} NodeID#${nodeId}: Expected delimiter count: ${rowMetadata.cols - 1}`);
+      // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED *** - Attempting reconstruction.`);
       
       // Check if this is an image selection issue
       const hasImageSelected = delimitedTextFromLine.includes('currently-selected');
       const hasImageContent = delimitedTextFromLine.includes('image:');
-      // log(`${logPrefix} NodeID#${nodeId}: Has selected image: ${hasImageSelected}`);
-      // log(`${logPrefix} NodeID#${nodeId}: Has image content: ${hasImageContent}`);
-      
       if (hasImageSelected) {
         // log(`${logPrefix} NodeID#${nodeId}: *** POTENTIAL CAUSE: Image selection state may be affecting segment parsing ***`);
       }
-      
-      // ENHANCED: Always reconstruct the correct structure based on metadata
-      const reconstructedSegments = [];
-      
-    if (htmlSegments.length === 1 && rowMetadata.cols > 1) {
-          // Single segment case - put all content in first column, empty remaining columns
-          // log(`${logPrefix} NodeID#${nodeId}: Single segment detected, distributing content to first column of ${rowMetadata.cols} columns.`);
+
+      // First attempt: reconstruct using DOM spans that carry tblCell-N classes
+      let usedClassReconstruction = false;
+      try {
+        const cols = Math.max(0, Number(rowMetadata.cols) || 0);
+        const grouped = Array.from({ length: cols }, () => '');
+        const candidates = Array.from(node.querySelectorAll('[class*="tblCell-"]'));
+
+        const classNum = (el) => {
+          if (!el || !el.classList) return -1;
+          for (const cls of el.classList) {
+            const m = /^tblCell-(\d+)$/.exec(cls);
+            if (m) return parseInt(m[1], 10);
+          }
+          return -1;
+        };
+        const hasAncestorWithSameCell = (el, n) => {
+          let p = el?.parentElement;
+          while (p) {
+            if (p.classList && p.classList.contains(`tblCell-${n}`)) return true;
+            p = p.parentElement;
+          }
+          return false;
+        };
+
+        for (const el of candidates) {
+          const n = classNum(el);
+          if (n >= 0 && n < cols) {
+            if (!hasAncestorWithSameCell(el, n)) {
+              grouped[n] += el.outerHTML || '';
+            }
+          }
+        }
+        const usable = grouped.some(s => s && s.trim() !== '');
+        if (usable) {
+          finalHtmlSegments = grouped.map(s => (s && s.trim() !== '') ? s : '&nbsp;');
+          usedClassReconstruction = true;
+          console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Reconstructed ${finalHtmlSegments.length} segments from tblCell-N classes.`);
+        }
+      } catch (e) {
+        console.debug(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Class-based reconstruction error; falling back.`, e);
+      }
+
+      // Fallback: reconstruct from string segments
+      if (!usedClassReconstruction) {
+        const reconstructedSegments = [];
+        if (htmlSegments.length === 1 && rowMetadata.cols > 1) {
           reconstructedSegments.push(htmlSegments[0]);
-      for (let i = 1; i < rowMetadata.cols; i++) {
-              reconstructedSegments.push('&nbsp;');
-      }
-    } else if (htmlSegments.length > rowMetadata.cols) {
-          // Too many segments - merge excess into last column
-          // log(`${logPrefix} NodeID#${nodeId}: Too many segments (${htmlSegments.length}), merging excess into ${rowMetadata.cols} columns.`);
-      for (let i = 0; i < rowMetadata.cols - 1; i++) {
-              reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
-      }
-          // Merge remaining segments into last column
+          for (let i = 1; i < rowMetadata.cols; i++) {
+            reconstructedSegments.push('&nbsp;');
+          }
+        } else if (htmlSegments.length > rowMetadata.cols) {
+          for (let i = 0; i < rowMetadata.cols - 1; i++) {
+            reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
+          }
           const remainingSegments = htmlSegments.slice(rowMetadata.cols - 1);
           reconstructedSegments.push(remainingSegments.join('|') || '&nbsp;');
-    } else {
-          // Too few segments - pad with empty columns
-          // log(`${logPrefix} NodeID#${nodeId}: Too few segments (${htmlSegments.length}), padding to ${rowMetadata.cols} columns.`);
-      for (let i = 0; i < rowMetadata.cols; i++) {
-              reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
+        } else {
+          for (let i = 0; i < rowMetadata.cols; i++) {
+            reconstructedSegments.push(htmlSegments[i] || '&nbsp;');
           }
+        }
+        finalHtmlSegments = reconstructedSegments;
       }
-      
-      // log(`${logPrefix} NodeID#${nodeId}: Reconstructed ${reconstructedSegments.length} segments to match expected ${rowMetadata.cols} columns.`);
-      finalHtmlSegments = reconstructedSegments;
-      
+
+      // Only warn if we still don't have the right number of segments
+      if (finalHtmlSegments.length !== rowMetadata.cols) {
+        console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Could not reconstruct to expected ${rowMetadata.cols} segments. Got ${finalHtmlSegments.length}.`);
+      }
   } else {
       // log(`${logPrefix} NodeID#${nodeId}: Segment count matches metadata cols (${rowMetadata.cols}). Using original segments.`);
   }
@@ -4240,202 +4298,3 @@ exports.aceUndoRedo = (hook, ctx) => {
     // log(`${logPrefix} Error details:`, { message: e.message, stack: e.stack });
   }
 };
-
-// *** ADDED: postAceInit hook for attaching listeners ***
-exports.postAceInit = (hookName, ctx) => {
-  const func = '[ep_data_tables:postAceInit]';
-  // log(`${func} START`);
-  const editorInfo = ctx.ace; // Get editorInfo from context
-
-  if (!editorInfo) {
-    console.error(`${func} ERROR: editorInfo (ctx.ace) is not available.`);
-    return;
-  }
-
-  const attachReconnectHandler = () => {
-    try {
-      const padObj = window.pad;
-      const socket = padObj && padObj.socket;
-      if (!socket) return false; // Not ready yet
-
-      if (socket.ep_data_tables_reconnect_listener_attached) return true;
-
-      let triggered = false;
-      const triggerHardReconnect = (evtName) => {
-        if (triggered) return;
-        triggered = true;
-        console.log(`[ep_data_tables] Socket.IO event '${evtName}' – invoking pad.forceReconnect()`);
-        if (window.pad && typeof window.pad.forceReconnect === 'function') {
-          try { window.pad.forceReconnect(); } catch(e) { console.error('[ep_data_tables] pad.forceReconnect() failed', e); window.location.reload(); }
-        } else {
-          window.location.reload();
-        }
-      };
-
-      socket.on('reconnect_attempt', () => triggerHardReconnect('reconnect_attempt'));
-      socket.on('reconnect', () => triggerHardReconnect('reconnect'));
-      socket.on('connect', () => { if (socket.disconnectedPreviously) triggerHardReconnect('connect'); });
-      socket.on('disconnect', () => { socket.disconnectedPreviously = true; });
-
-      socket.ep_data_tables_reconnect_listener_attached = true;
-      console.log('[ep_data_tables] Reconnect handler fully attached to pad.socket');
-      return true;
-    } catch (e) {
-      console.error('[ep_data_tables] Error attaching reconnect listener:', e);
-      return false;
-    }
-  };
-
-  // Keep trying until it attaches (no max attempts)
-  if (!attachReconnectHandler()) {
-    const intervalId = setInterval(() => {
-      if (attachReconnectHandler()) clearInterval(intervalId);
-    }, 500);
-  }
-  
-  // Setup mousedown listener via callWithAce
-  editorInfo.ace_callWithAce((ace) => {
-      const editor = ace.editor;
-      const inner = ace.editor.container; // Use the main container
-
-      if (!editor || !inner) {
-          console.error(`${func} ERROR: ace.editor or ace.editor.container not found within ace_callWithAce.`);
-          return;
-      }
-
-      // log(`${func} Inside callWithAce for attaching mousedown listeners.`);
-
-      // Initialize shared state on the editor object
-      if (!editor.ep_data_tables_last_clicked) {
-          editor.ep_data_tables_last_clicked = null;
-          // log(`${func} Initialized ace.editor.ep_data_tables_last_clicked`);
-      }
-
-      // log(`${func} Attempting to attach mousedown listener to editor container for cell selection...`);
-
-      inner.addEventListener('mousedown', (evt) => {
-          const target = evt.target;
-          const mousedownFuncName = '[ep_data_tables mousedown]';
-          // log(`${mousedownFuncName} RAW MOUSE DOWN detected. Target:`, target);
-          // log(`${mousedownFuncName} Target tagName: ${target.tagName}`);
-          // log(`${mousedownFuncName} Target className: ${target.className}`);
-          // log(`${mousedownFuncName} Target ID: ${target.id}`);
-
-          // Don't interfere with resize handle clicks
-          if (target.classList && target.classList.contains('ep-data_tables-resize-handle')) {
-            // log(`${mousedownFuncName} Click on resize handle, skipping cell selection logic.`);
-            return;
-          }
-
-          // *** ENHANCED DEBUG: Check for image-related elements ***
-          const $target = $(target);
-          const isImageElement = $target.closest('.inline-image, .image-placeholder, .image-inner, .image-resize-handle').length > 0;
-          // log(`${mousedownFuncName} Is target or ancestor image-related?`, isImageElement);
-          
-          if (isImageElement) {
-            // log(`${mousedownFuncName} *** IMAGE ELEMENT DETECTED ***`);
-            // log(`${mousedownFuncName} Closest image container:`, $target.closest('.inline-image, .image-placeholder')[0]);
-            // log(`${mousedownFuncName} Is .inline-image:`, $target.hasClass('inline-image') || $target.closest('.inline-image').length > 0);
-            // log(`${mousedownFuncName} Is .image-placeholder:`, $target.hasClass('image-placeholder') || $target.closest('.image-placeholder').length > 0);
-            // log(`${mousedownFuncName} Is .image-inner:`, $target.hasClass('image-inner') || $target.closest('.image-inner').length > 0);
-            // log(`${mousedownFuncName} Is .image-resize-handle:`, $target.hasClass('image-resize-handle') || $target.closest('.image-resize-handle').length > 0);
-          }
-          
-          // Check if the click is on an image or image-related element - if so, completely skip
-          if (isImageElement) {
-            // log(`${mousedownFuncName} Click detected on image element within table cell. Completely skipping table processing to avoid interference.`);
-            return;
-          }
-
-          // *** ENHANCED DEBUG: Check table context ***
-          const clickedTD = target.closest('td');
-          const clickedTR = target.closest('tr');
-          const clickedTable = target.closest('table.dataTable');
-          
-          // log(`${mousedownFuncName} Table context analysis:`);
-          // log(`${mousedownFuncName} - Clicked TD:`, !!clickedTD);
-          // log(`${mousedownFuncName} - Clicked TR:`, !!clickedTR);
-          // log(`${mousedownFuncName} - Clicked table.dataTable:`, !!clickedTable);
-          
-          if (clickedTable) {
-            // log(`${mousedownFuncName} - Table tblId:`, clickedTable.getAttribute('data-tblId'));
-            // log(`${mousedownFuncName} - Table row:`, clickedTable.getAttribute('data-row'));
-          }
-          if (clickedTD) {
-            // log(`${mousedownFuncName} - TD data-column:`, clickedTD.getAttribute('data-column'));
-            // log(`${mousedownFuncName} - TD innerHTML length:`, clickedTD.innerHTML?.length || 0);
-            // log(`${mousedownFuncName} - TD contains images:`, clickedTD.querySelector('.inline-image, .image-placeholder') ? 'YES' : 'NO');
-          }
-
-          // Clear previous selection state regardless of where click happened
-          if (editor.ep_data_tables_last_clicked) {
-              // log(`${mousedownFuncName} Clearing previous selection info.`);
-              // TODO: Add visual class removal if needed
-          }
-          editor.ep_data_tables_last_clicked = null; // Clear state first
-
-          if (clickedTD && clickedTR && clickedTable) {
-              // log(`${mousedownFuncName} Click detected inside table.dataTable td.`);
-              try {
-                  const cellIndex = Array.from(clickedTR.children).indexOf(clickedTD);
-                  const lineNode = clickedTable.closest('div.ace-line');
-                  const tblId = clickedTable.getAttribute('data-tblId');
-
-                  // log(`${mousedownFuncName} Cell analysis:`);
-                  // log(`${mousedownFuncName} - Cell index:`, cellIndex);
-                  // log(`${mousedownFuncName} - Line node:`, !!lineNode);
-                  // log(`${mousedownFuncName} - Line node ID:`, lineNode?.id);
-                  // log(`${mousedownFuncName} - Table ID:`, tblId);
-
-                  // Ensure ace.rep and ace.rep.lines are available
-                  if (!ace.rep || !ace.rep.lines) {
-                      console.error(`${mousedownFuncName} ERROR: ace.rep or ace.rep.lines not available inside mousedown listener.`);
-                      return;
-                  }
-
-                  if (lineNode && lineNode.id && tblId !== null && cellIndex !== -1) {
-                      const lineNum = ace.rep.lines.indexOfKey(lineNode.id);
-                      if (lineNum !== -1) {
-                           // Store the accurately determined cell info
-                           // Initialize relative position - might be refined later if needed
-                           const clickInfo = { lineNum, tblId, cellIndex, relativePos: 0 }; // Set initial relativePos to 0
-                           editor.ep_data_tables_last_clicked = clickInfo;
-                           // log(`${mousedownFuncName} Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}. Stored click info:`, clickInfo);
-
-                           // --- NEW: Jump caret immediately for snappier UX ---
-                           try {
-                             const docMgr = ace.ep_data_tables_docManager;
-                             if (docMgr && typeof navigateToCell === 'function') {
-                               const navOk = navigateToCell(lineNum, cellIndex, ace, docMgr);
-                               // log(`${mousedownFuncName} Immediate navigateToCell result: ${navOk}`);
-                             }
-                           } catch (navErr) {
-                             console.error(`${mousedownFuncName} Error during immediate caret navigation:`, navErr);
-                           }
-
-                           // TODO: Add visual class for selection if desired
-                           // log(`${mousedownFuncName} TEST: Skipped adding/removing selected-table-cell class`);
-
-                      } else {
-                          // log(`${mousedownFuncName} Clicked cell (ERROR): Could not find line number for node ID: ${lineNode.id}`);
-                      }
-                  } else {
-                       // log(`${mousedownFuncName} Clicked cell (ERROR): Missing required info (lineNode, lineNode.id, tblId, or valid cellIndex).`, { lineNode, tblId, cellIndex });
-                  }
-              } catch (e) {
-                  console.error(`${mousedownFuncName} Error processing table cell click:`, e);
-                  // log(`${mousedownFuncName} Error details:`, { message: e.message, stack: e.stack });
-                  editor.ep_data_tables_last_clicked = null; // Ensure state is clear on error
-              }
-          } else {
-               // log(`${mousedownFuncName} Click was outside a table.dataTable td.`);
-          }
-      });
-      // log(`${func} Mousedown listeners for cell selection attached successfully (inside callWithAce).`);
-
-  }, 'tableCellSelectionPostAce', true); // Unique name for callstack
-
-  // log(`${func} END`);
-};
-
-// END OF FILE

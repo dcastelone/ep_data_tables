@@ -37,11 +37,11 @@
     "root": true,
     "extends": "etherpad/plugin"
   },
+  "engines": {
+    "node": ">= 10.13.0"
+  },
   "scripts": {
     "lint": "eslint .",
     "lint:fix": "eslint --fix ."
-  },
-  "engines": {
-    "node": ">= 10.13.0"
   }
 }

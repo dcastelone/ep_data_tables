@@ -1,5 +1,9 @@
 'use strict';
 
+// Ensure settings.toolbar exists early to avoid load-order error with ep_font_color
+const settings = require('ep_etherpad-lite/node/utils/Settings');
+if (!settings.toolbar) settings.toolbar = {};
+
 // Using console.log for server-side logging, similar to other Etherpad server-side files.
 const log = (...m) => console.log('[ep_data_tables:collectContentPre_SERVER]', ...m);
 

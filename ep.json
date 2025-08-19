@@ -10,8 +10,6 @@
 		},
   		"client_hooks": {
 		  "collectContentPre"      : "ep_data_tables/static/js/client_hooks:collectContentPre",
-		  "collectContentLineBreak": "ep_data_tables/static/js/collector_hooks:collectContentLineBreak",
-		  "collectContentLineText" : "ep_data_tables/static/js/collector_hooks:collectContentLineText",
 		  "aceKeyEvent"                 : "ep_data_tables/static/js/client_hooks:aceKeyEvent",
 		  "aceStartLineAndCharForPoint" : "ep_data_tables/static/js/client_hooks:aceStartLineAndCharForPoint",
 		  "aceEndLineAndCharForPoint"   : "ep_data_tables/static/js/client_hooks:aceEndLineAndCharForPoint",
