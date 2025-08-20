@@ -1591,12 +1591,12 @@ exports.aceKeyEvent = (h, ctx) => {
   // --- Check for Ctrl+X (Cut) key combination ---
   const isCutKey = (evt.ctrlKey || evt.metaKey) && (evt.key === 'x' || evt.key === 'X' || evt.keyCode === 88);
   if (isCutKey && hasSelection) {
-    // log(`${logPrefix} Ctrl+X (Cut) detected with selection. Letting cut event handler manage this.`);
+    log(`${logPrefix} Ctrl+X (Cut) detected with selection. Letting cut event handler manage this.`);
     // Let the cut event handler handle this - we don't need to preventDefault here
     // as the cut event will handle the operation and prevent default
     return false; // Allow the cut event to be triggered
   } else if (isCutKey && !hasSelection) {
-    // log(`${logPrefix} Ctrl+X (Cut) detected but no selection. Allowing default.`);
+    log(`${logPrefix} Ctrl+X (Cut) detected but no selection. Allowing default.`);
     return false; // Allow default - nothing to cut
   }
 
@@ -1950,38 +1950,37 @@ exports.aceInitialized = (h, ctx) => {
     }
 
     // *** CUT EVENT LISTENER ***
-    // log(`${callWithAceLogPrefix} Attaching cut event listener to $inner (inner iframe body).`);
+    log(`${callWithAceLogPrefix} Attaching cut event listener to $inner (inner iframe body).`);
     $inner.on('cut', (evt) => {
       const cutLogPrefix = '[ep_data_tables:cutHandler]';
-      // log(`${cutLogPrefix} CUT EVENT TRIGGERED. Event object:`, evt);
+      console.log(`${cutLogPrefix} CUT EVENT TRIGGERED. Event object:`, evt);
 
-      // log(`${cutLogPrefix} Getting current editor representation (rep).`);
+      console.log(`${cutLogPrefix} Getting current editor representation (rep).`);
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) {
-        // log(`${cutLogPrefix} WARNING: Could not get representation or selection. Allowing default cut.`);
+        console.warn(`${cutLogPrefix} WARNING: Could not get representation or selection. Allowing default cut.`);
         console.warn(`${cutLogPrefix} Could not get rep or selStart.`);
         return; // Allow default
       }
-      // log(`${cutLogPrefix} Rep obtained. selStart:`, rep.selStart, `selEnd:`, rep.selEnd);
+      console.log(`${cutLogPrefix} Rep obtained. selStart:`, rep.selStart, `selEnd:`, rep.selEnd);
       const selStart = rep.selStart;
       const selEnd = rep.selEnd;
       const lineNum = selStart[0];
-      // log(`${cutLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
-
-      // Check if there's actually a selection to cut
-      if (selStart[0] === selEnd[0] && selStart[1] === selEnd[1]) {
-        // log(`${cutLogPrefix} No selection to cut. Allowing default cut.`);
-        return; // Allow default - nothing to cut
+      console.log(`${cutLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
+      // Determine if there is a selection in the editor representation
+      const hasSelectionInRep = !(selStart[0] === selEnd[0] && selStart[1] === selEnd[1]);
+      if (!hasSelectionInRep) {
+        console.log(`${cutLogPrefix} No selection detected in rep; deferring decision until table-line check.`);
       }
 
       // Check if selection spans multiple lines
       if (selStart[0] !== selEnd[0]) {
-        // log(`${cutLogPrefix} WARNING: Selection spans multiple lines. Preventing cut to protect table structure.`);
+        console.warn(`${cutLogPrefix} WARNING: Selection spans multiple lines. Preventing cut to protect table structure.`);
         evt.preventDefault();
         return;
       }
 
-      // log(`${cutLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
+      console.log(`${cutLogPrefix} Checking if line ${lineNum} is a table line by fetching '${ATTR_TABLE_JSON}' attribute.`);
       let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
       let tableMetadata = null;
 
@@ -1998,11 +1997,18 @@ exports.aceInitialized = (h, ctx) => {
       }
 
       if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
-        // log(`${cutLogPrefix} Line ${lineNum} is NOT a recognised table line. Allowing default cut.`);
+        console.log(`${cutLogPrefix} Line ${lineNum} is NOT a recognised table line. Allowing default cut.`);
         return; // Not a table line
       }
 
-      // log(`${cutLogPrefix} Line ${lineNum} IS a table line. Metadata:`, tableMetadata);
+      console.log(`${cutLogPrefix} Line ${lineNum} IS a table line. Metadata:`, tableMetadata);
+
+      // If inside a table line but the rep shows no selection, prevent default to protect structure
+      if (!hasSelectionInRep) {
+        console.log(`${cutLogPrefix} Preventing default CUT on table line with collapsed selection to protect delimiters.`);
+        evt.preventDefault();
+        return;
+      }
 
       // Validate selection is within cell boundaries
       const lineText = rep.lines.atIndex(lineNum)?.text || '';
@@ -2052,37 +2058,37 @@ exports.aceInitialized = (h, ctx) => {
         selEnd[1] = cellEndCol;              // clamp
       }
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
-        // log(`${cutLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing cut to protect table structure.`);
+        console.warn(`${cutLogPrefix} WARNING: Selection spans cell boundaries or is outside cells. Preventing cut to protect table structure.`);
         evt.preventDefault();
         return;
       }
 
       // If we reach here, the selection is entirely within a single cell - allow cut and preserve table structure
-      // log(`${cutLogPrefix} Selection is entirely within cell ${targetCellIndex}. Intercepting cut to preserve table structure.`);
+      console.log(`${cutLogPrefix} Selection is entirely within cell ${targetCellIndex}. Intercepting cut to preserve table structure.`);
       evt.preventDefault();
 
       try {
         // Get the selected text to copy to clipboard
         const selectedText = lineText.substring(selStart[1], selEnd[1]);
-        // log(`${cutLogPrefix} Selected text to cut: "${selectedText}"`);
+        console.log(`${cutLogPrefix} Selected text to cut: "${selectedText}"`);
 
         // Copy to clipboard manually
         if (navigator.clipboard && navigator.clipboard.writeText) {
           navigator.clipboard.writeText(selectedText).then(() => {
-            // log(`${cutLogPrefix} Successfully copied to clipboard via Navigator API.`);
+            console.log(`${cutLogPrefix} Successfully copied to clipboard via Navigator API.`);
           }).catch((err) => {
             console.warn(`${cutLogPrefix} Failed to copy to clipboard via Navigator API:`, err);
           });
         } else {
           // Fallback for older browsers
-          // log(`${cutLogPrefix} Using fallback clipboard method.`);
+          console.log(`${cutLogPrefix} Using fallback clipboard method.`);
           const textArea = document.createElement('textarea');
           textArea.value = selectedText;
           document.body.appendChild(textArea);
           textArea.select();
           try {
             document.execCommand('copy');
-            // log(`${cutLogPrefix} Successfully copied to clipboard via execCommand fallback.`);
+            console.log(`${cutLogPrefix} Successfully copied to clipboard via execCommand fallback.`);
           } catch (err) {
             console.warn(`${cutLogPrefix} Failed to copy to clipboard via fallback:`, err);
           }
@@ -2090,14 +2096,14 @@ exports.aceInitialized = (h, ctx) => {
         }
 
         // Now perform the deletion within the cell using ace operations
-        // log(`${cutLogPrefix} Performing deletion via ed.ace_callWithAce.`);
+        console.log(`${cutLogPrefix} Performing deletion via ed.ace_callWithAce.`);
         ed.ace_callWithAce((aceInstance) => {
           const callAceLogPrefix = `${cutLogPrefix}[ace_callWithAceOps]`;
-          // log(`${callAceLogPrefix} Entered ace_callWithAce for cut operations. selStart:`, selStart, `selEnd:`, selEnd);
+          console.log(`${callAceLogPrefix} Entered ace_callWithAce for cut operations. selStart:`, selStart, `selEnd:`, selEnd);
           
-          // log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to delete selected text.`);
+          console.log(`${callAceLogPrefix} Calling aceInstance.ace_performDocumentReplaceRange to delete selected text.`);
           aceInstance.ace_performDocumentReplaceRange(selStart, selEnd, '');
-          // log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
+          console.log(`${callAceLogPrefix} ace_performDocumentReplaceRange successful.`);
 
           // --- Ensure cell is not left empty (zero-length) ---
           const repAfterDeletion = aceInstance.ace_getRep();
@@ -2106,7 +2112,7 @@ exports.aceInitialized = (h, ctx) => {
           const cellTextAfterDeletion = cellsAfterDeletion[targetCellIndex] || '';
 
           if (cellTextAfterDeletion.length === 0) {
-            // log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after cut – inserting single space to preserve structure.`);
+            console.log(`${callAceLogPrefix} Cell ${targetCellIndex} became empty after cut – inserting single space to preserve structure.`);
             const insertPos = [lineNum, selStart[1]]; // Start of the now-empty cell
             aceInstance.ace_performDocumentReplaceRange(insertPos, insertPos, ' ');
 
@@ -2118,9 +2124,9 @@ exports.aceInitialized = (h, ctx) => {
             );
           }
 
-          // log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
+          console.log(`${callAceLogPrefix} Preparing to re-apply tbljson attribute to line ${lineNum}.`);
           const repAfterCut = aceInstance.ace_getRep();
-          // log(`${callAceLogPrefix} Fetched rep after cut for applyMeta. Line ${lineNum} text now: "${repAfterCut.lines.atIndex(lineNum).text}"`);
+          console.log(`${callAceLogPrefix} Fetched rep after cut for applyMeta. Line ${lineNum} text now: "${repAfterCut.lines.atIndex(lineNum).text}"`);
           
           ed.ep_data_tables_applyMeta(
             lineNum,
@@ -2132,20 +2138,20 @@ exports.aceInitialized = (h, ctx) => {
             null,
             docManager
           );
-          // log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_data_tables_applyMeta.`);
+          console.log(`${callAceLogPrefix} tbljson attribute re-applied successfully via ep_data_tables_applyMeta.`);
 
           const newCaretPos = [lineNum, selStart[1]];
-          // log(`${callAceLogPrefix} Setting caret position to: [${newCaretPos}].`);
+          console.log(`${callAceLogPrefix} Setting caret position to: [${newCaretPos}].`);
           aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
-          // log(`${callAceLogPrefix} Selection change successful.`);
+          console.log(`${callAceLogPrefix} Selection change successful.`);
 
-          // log(`${callAceLogPrefix} Cut operations within ace_callWithAce completed successfully.`);
+          console.log(`${callAceLogPrefix} Cut operations within ace_callWithAce completed successfully.`);
         }, 'tableCutTextOperations', true);
 
-        // log(`${cutLogPrefix} Cut operation completed successfully.`);
+        console.log(`${cutLogPrefix} Cut operation completed successfully.`);
       } catch (error) {
         console.error(`${cutLogPrefix} ERROR during cut operation:`, error);
-        // log(`${cutLogPrefix} Cut operation failed. Error details:`, { message: error.message, stack: error.stack });
+        console.log(`${cutLogPrefix} Cut operation failed. Error details:`, { message: error.message, stack: error.stack });
       }
     });
 
@@ -2339,6 +2345,18 @@ exports.aceInitialized = (h, ctx) => {
       const dropLogPrefix = '[ep_data_tables:dropHandler]';
       // log(`${dropLogPrefix} DROP EVENT TRIGGERED. Event object:`, evt);
 
+      // Block drops directly targeted at a table element regardless of selection state
+      const targetEl = evt.target;
+      if (targetEl && typeof targetEl.closest === 'function' && targetEl.closest('table.dataTable')) {
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (evt.originalEvent && evt.originalEvent.dataTransfer) {
+          try { evt.originalEvent.dataTransfer.dropEffect = 'none'; } catch (_) {}
+        }
+        console.warn('[ep_data_tables] Drop prevented on table to protect structure.');
+        return;
+      }
+
       // log(`${dropLogPrefix} Getting current editor representation (rep).`);
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) {
@@ -2372,6 +2390,17 @@ exports.aceInitialized = (h, ctx) => {
     $inner.on('dragover', (evt) => {
       const dragLogPrefix = '[ep_data_tables:dragoverHandler]';
       
+      // If hovering over a table, signal not-allowed and block default
+      const targetEl = evt.target;
+      if (targetEl && typeof targetEl.closest === 'function' && targetEl.closest('table.dataTable')) {
+        if (evt.originalEvent && evt.originalEvent.dataTransfer) {
+          try { evt.originalEvent.dataTransfer.dropEffect = 'none'; } catch (_) {}
+        }
+        evt.preventDefault();
+        evt.stopPropagation();
+        return;
+      }
+
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) {
         return; // Allow default
@@ -2392,6 +2421,18 @@ exports.aceInitialized = (h, ctx) => {
       if (isTableLine) {
         // log(`${dragLogPrefix} Preventing dragover on table line ${lineNum} to control drop handling.`);
         evt.preventDefault();
+      }
+    });
+
+    // Guard against dragenter into table areas
+    $inner.on('dragenter', (evt) => {
+      const targetEl = evt.target;
+      if (targetEl && typeof targetEl.closest === 'function' && targetEl.closest('table.dataTable')) {
+        if (evt.originalEvent && evt.originalEvent.dataTransfer) {
+          try { evt.originalEvent.dataTransfer.dropEffect = 'none'; } catch (_) {}
+        }
+        evt.preventDefault();
+        evt.stopPropagation();
       }
     });
 
@@ -2849,14 +2890,15 @@ exports.aceInitialized = (h, ctx) => {
       // *** DRAG PREVENTION FOR TABLE ELEMENTS ***
       const preventTableDrag = (evt) => {
         const target = evt.target;
-        // Check if the target is a table element or inside a table
-        if (target.tagName === 'TABLE' && target.classList.contains('dataTable') ||
-            target.tagName === 'TD' && target.closest('table.dataTable') ||
-            target.tagName === 'TR' && target.closest('table.dataTable') ||
-            target.tagName === 'TBODY' && target.closest('table.dataTable')) {
-          // log('[ep_data_tables:dragPrevention] Preventing drag operation on table element:', target.tagName);
+        // Block ANY drag gesture that originates within a table (including spans/text inside cells)
+        const inTable = target && typeof target.closest === 'function' && target.closest('table.dataTable');
+        if (inTable) {
+          // log('[ep_data_tables:dragPrevention] Preventing drag operation originating from inside table');
           evt.preventDefault();
           evt.stopPropagation();
+          if (evt.originalEvent && evt.originalEvent.dataTransfer) {
+            try { evt.originalEvent.dataTransfer.effectAllowed = 'none'; } catch (_) {}
+          }
           return false;
         }
       };
@@ -2866,6 +2908,21 @@ exports.aceInitialized = (h, ctx) => {
       $inner.on('drag', preventTableDrag);
       $inner.on('dragend', preventTableDrag);
       // log(`${callWithAceLogPrefix} Attached drag prevention handlers to inner body`);
+
+      // Attach drag prevention broadly to cover iframe boundaries and the host document
+      if (innerDoc.length > 0) {
+        innerDoc.on('dragstart', preventTableDrag);
+        innerDoc.on('drag', preventTableDrag);
+        innerDoc.on('dragend', preventTableDrag);
+      }
+      if (outerDoc.length > 0) {
+        outerDoc.on('dragstart', preventTableDrag);
+        outerDoc.on('drag', preventTableDrag);
+        outerDoc.on('dragend', preventTableDrag);
+      }
+      $(document).on('dragstart', preventTableDrag);
+      $(document).on('drag', preventTableDrag);
+      $(document).on('dragend', preventTableDrag);
     };
     
     // Setup the global handlers
