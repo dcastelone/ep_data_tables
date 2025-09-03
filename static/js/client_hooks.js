@@ -60,6 +60,21 @@ let resizeOriginalWidths = [];
 let resizeTableMetadata = null;
 let resizeLineNum = -1;
 let resizeOverlay = null; // Visual overlay element
+// Android Chrome composition handling state
+let suppressNextBeforeInputInsertTextOnce = false;
+let isAndroidChromeComposition = false;
+let handledCurrentComposition = false;
+// Suppress all beforeinput insertText events during an Android Chrome IME composition
+let suppressBeforeInputInsertTextDuringComposition = false;
+// Helper to detect Android Chromium-family browsers (exclude iOS and Firefox)
+function isAndroidChromiumUA() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  const isAndroid = ua.includes('android');
+  const isIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('crios');
+  const isFirefox = ua.includes('firefox');
+  const isChromiumFamily = ua.includes('chrome') || ua.includes('edg') || ua.includes('opr') || ua.includes('samsungbrowser') || ua.includes('vivaldi') || ua.includes('brave');
+  return isAndroid && !isIOS && !isFirefox && isChromiumFamily;
+}
 
 // ─────────────────── Reusable Helper Functions ───────────────────
 
@@ -936,7 +951,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   const delimiterCount = (delimitedTextFromLine || '').split(DELIMITER).length - 1;
   // log(`${logPrefix} NodeID#${nodeId}: Delimiter '${DELIMITER}' count in innerHTML: ${delimiterCount}`);
   // log(`${logPrefix} NodeID#${nodeId}: Expected delimiters for ${rowMetadata.cols} columns: ${rowMetadata.cols - 1}`);
-  
+
   // log all delimiter positions
   let pos = -1;
   const delimiterPositions = [];
@@ -2180,10 +2195,99 @@ exports.aceInitialized = (h, ctx) => {
       const lineNum = selStart[0];
       // log(`${deleteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
 
-      // Check if there's actually a selection to delete
-      if (selStart[0] === selEnd[0] && selStart[1] === selEnd[1]) {
-        // log(`${deleteLogPrefix} No selection to delete. Allowing default delete.`);
-        return; // Allow default - nothing to delete
+      // Android Chrome IME: collapsed backspace/forward-delete often comes via beforeinput
+      const isAndroidChrome = isAndroidChromiumUA();
+      const inputType = (evt.originalEvent && evt.originalEvent.inputType) || '';
+
+      // Handle collapsed deletes on Android Chrome inside a table line to protect delimiters
+      const isCollapsed = (selStart[0] === selEnd[0] && selStart[1] === selEnd[1]);
+      if (isCollapsed && isAndroidChrome && (inputType === 'deleteContentBackward' || inputType === 'deleteContentForward')) {
+        // Resolve metadata for this line
+        let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+        let tableMetadata = null;
+        if (lineAttrString) { try { tableMetadata = JSON.parse(lineAttrString); } catch (_) {} }
+        if (!tableMetadata) tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+        if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+          return; // Not a table line; allow default
+        }
+
+        // Compute current cell and boundaries
+        const lineText = rep.lines.atIndex(lineNum)?.text || '';
+        const cells = lineText.split(DELIMITER);
+        let currentOffset = 0;
+        let targetCellIndex = -1;
+        let cellStartCol = 0;
+        let cellEndCol = 0;
+        for (let i = 0; i < cells.length; i++) {
+          const cellLength = cells[i]?.length ?? 0;
+          const cellEndColThisIteration = currentOffset + cellLength;
+          if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+            targetCellIndex = i;
+            cellStartCol = currentOffset;
+            cellEndCol = cellEndColThisIteration;
+            break;
+          }
+          currentOffset += cellLength + DELIMITER.length;
+        }
+
+        if (targetCellIndex === -1) return; // Allow default if not within a cell
+
+        const isBackward = inputType === 'deleteContentBackward';
+        const caretCol = selStart[1];
+
+        // Prevent deletion across delimiters or line boundaries
+        if ((isBackward && caretCol === cellStartCol) || (!isBackward && caretCol === cellEndCol)) {
+          evt.preventDefault();
+          return;
+        }
+
+        // Intercept and perform one-character deletion via Ace
+        evt.preventDefault();
+        try {
+          ed.ace_callWithAce((aceInstance) => {
+            const delStart = isBackward ? [lineNum, caretCol - 1] : [lineNum, caretCol];
+            const delEnd   = isBackward ? [lineNum, caretCol]     : [lineNum, caretCol + 1];
+            aceInstance.ace_performDocumentReplaceRange(delStart, delEnd, '');
+
+            // Re-apply table metadata attribute to ensure renderer stability
+            const repAfter = aceInstance.ace_getRep();
+            ed.ep_data_tables_applyMeta(
+              lineNum,
+              tableMetadata.tblId,
+              tableMetadata.row,
+              tableMetadata.cols,
+              repAfter,
+              ed,
+              null,
+              docManager
+            );
+
+            // Set caret position after deletion
+            const newCaretCol = isBackward ? caretCol - 1 : caretCol;
+            const newCaretPos = [lineNum, newCaretCol];
+            aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+            aceInstance.ace_fastIncorp(10);
+
+            // Update last-clicked state if available
+            if (ed.ep_data_tables_editor && ed.ep_data_tables_editor.ep_data_tables_last_clicked && ed.ep_data_tables_editor.ep_data_tables_last_clicked.tblId === tableMetadata.tblId) {
+              const newRelativePos = newCaretCol - cellStartCol;
+              ed.ep_data_tables_editor.ep_data_tables_last_clicked = {
+                lineNum: lineNum,
+                tblId: tableMetadata.tblId,
+                cellIndex: targetCellIndex,
+                relativePos: newRelativePos < 0 ? 0 : newRelativePos,
+              };
+            }
+          }, 'tableCollapsedDeleteHandler', true);
+        } catch (error) {
+          console.error(`${deleteLogPrefix} ERROR handling collapsed delete:`, error);
+        }
+        return;
+      }
+
+      // Non-Android or non-collapsed: require an actual selection to handle here; otherwise allow default
+      if (isCollapsed) {
+        return; // Allow default
       }
 
       // Check if selection spans multiple lines
@@ -2334,6 +2438,319 @@ exports.aceInitialized = (h, ctx) => {
       } catch (error) {
         console.error(`${deleteLogPrefix} ERROR during delete operation:`, error);
         // log(`${deleteLogPrefix} Delete operation failed. Error details:`, { message: error.message, stack: error.stack });
+      }
+    });
+
+    // Android Chrome IME insert handling (targeted fix)
+    $inner.on('beforeinput', (evt) => {
+      const insertLogPrefix = '[ep_data_tables:beforeinputInsertHandler]';
+      const inputType = evt.originalEvent && evt.originalEvent.inputType || '';
+
+      // Only intercept insert types
+      if (!inputType || !inputType.startsWith('insert')) return;
+
+      // Target only Android Chromium-family browsers (exclude iOS and Firefox)
+      if (!isAndroidChromiumUA()) return;
+
+      // Get current selection and ensure we are inside a table line
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) return;
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+
+      // Resolve table metadata for this line
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+      if (lineAttrString) {
+        try { tableMetadata = JSON.parse(lineAttrString); } catch (_) {}
+      }
+      if (!tableMetadata) tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+        return; // not a table line
+      }
+
+      // Compute cell boundaries and target cell index
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+      for (let i = 0; i < cells.length; i++) {
+        const cellLength = cells[i]?.length ?? 0;
+        const cellEndColThisIteration = currentOffset + cellLength;
+        if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = cellEndColThisIteration;
+          break;
+        }
+        currentOffset += cellLength + DELIMITER.length;
+      }
+
+      // Clamp selection end if it includes a trailing delimiter of the same cell
+      if (targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length) {
+        selEnd[1] = cellEndCol;
+      }
+
+      // If selection spills outside the cell boundaries, block to protect structure
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
+        evt.preventDefault();
+        return;
+      }
+
+      // Handle line breaks by routing to Enter behavior
+      if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+        evt.preventDefault();
+        try {
+          navigateToCellBelow(lineNum, targetCellIndex, tableMetadata, ed, docManager);
+        } catch (e) { console.error(`${insertLogPrefix} Error navigating on line break:`, e); }
+        return;
+      }
+
+      // If we are in Android Chrome composition flow, suppress all insertText until composition ends
+      if (suppressBeforeInputInsertTextDuringComposition && inputType === 'insertText') {
+        evt.preventDefault();
+        return;
+      }
+
+      // If we already handled one insertion via composition handler, skip once (legacy single-shot)
+      if (suppressNextBeforeInputInsertTextOnce && inputType === 'insertText') {
+        suppressNextBeforeInputInsertTextOnce = false;
+        evt.preventDefault();
+        return;
+      }
+
+      // If composition session is active, let composition handler manage
+      if (isAndroidChromeComposition) return;
+
+      // Only proceed for textual insertions we can retrieve
+      const rawData = evt.originalEvent && typeof evt.originalEvent.data === 'string' ? evt.originalEvent.data : '';
+      // If no data for this insert type, allow default (paste/drop paths are handled elsewhere)
+      if (!rawData) return;
+
+      // Sanitize inserted text: remove our delimiter and zero-width characters
+      let insertedText = rawData
+        .replace(new RegExp(DELIMITER, 'g'), ' ')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ');
+
+      if (insertedText.length === 0) {
+        evt.preventDefault();
+        return;
+      }
+
+      // Intercept the browser default and perform the edit via Ace APIs
+      evt.preventDefault();
+      evt.stopPropagation();
+      if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+      try {
+        // Defer to next tick to avoid racing with browser internal composition state
+        setTimeout(() => {
+          ed.ace_callWithAce((aceInstance) => {
+            aceInstance.ace_fastIncorp(10);
+            const freshRep = aceInstance.ace_getRep();
+            const freshSelStart = freshRep.selStart;
+            const freshSelEnd = freshRep.selEnd;
+
+            // Replace selection with sanitized text
+            aceInstance.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
+
+            // Re-apply cell attribute to the newly inserted text (clamped to line length)
+            const repAfterReplace = aceInstance.ace_getRep();
+            const freshLineIndex = freshSelStart[0];
+            const freshLineEntry = repAfterReplace.lines.atIndex(freshLineIndex);
+            const maxLen = Math.max(0, (freshLineEntry && freshLineEntry.text) ? freshLineEntry.text.length : 0);
+            const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+            const endColRaw = startCol + insertedText.length;
+            const endCol = Math.min(endColRaw, maxLen);
+            if (endCol > startCol) {
+              aceInstance.ace_performDocumentApplyAttributesToRange(
+                [freshLineIndex, startCol], [freshLineIndex, endCol], [[ATTR_CELL, String(targetCellIndex)]]
+              );
+            }
+
+            // Re-apply table metadata line attribute
+            ed.ep_data_tables_applyMeta(
+              freshLineIndex,
+              tableMetadata.tblId,
+              tableMetadata.row,
+              tableMetadata.cols,
+              repAfterReplace,
+              ed,
+              null,
+              docManager
+            );
+
+            // Move caret to end of inserted text and update last-click state
+            const newCaretCol = endCol;
+            const newCaretPos = [freshLineIndex, newCaretCol];
+            aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+            aceInstance.ace_fastIncorp(10);
+
+            if (editor && editor.ep_data_tables_last_clicked && editor.ep_data_tables_last_clicked.tblId === tableMetadata.tblId) {
+              // Recompute cellStartCol for the fresh line to avoid mismatches
+              const freshLineText = (freshLineEntry && freshLineEntry.text) || '';
+              const freshCells = freshLineText.split(DELIMITER);
+              let freshOffset = 0;
+              for (let i = 0; i < targetCellIndex; i++) {
+                freshOffset += (freshCells[i]?.length ?? 0) + DELIMITER.length;
+              }
+              const newRelativePos = newCaretCol - freshOffset;
+              editor.ep_data_tables_last_clicked = {
+                lineNum: freshLineIndex,
+                tblId: tableMetadata.tblId,
+                cellIndex: targetCellIndex,
+                relativePos: newRelativePos < 0 ? 0 : newRelativePos,
+              };
+            }
+          }, 'tableInsertTextOperations', true);
+        }, 0);
+      } catch (error) {
+        console.error(`${insertLogPrefix} ERROR during insert handling:`, error);
+      }
+    });
+
+    // Composition start marker (Android Chrome/table only)
+    $inner.on('compositionstart', (evt) => {
+      if (!isAndroidChromiumUA()) return;
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) return;
+      const lineNum = rep.selStart[0];
+      let meta = null; let s = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      if (s) { try { meta = JSON.parse(s); } catch (_) {} }
+      if (!meta) meta = getTableLineMetadata(lineNum, ed, docManager);
+      if (!meta || typeof meta.cols !== 'number') return;
+      isAndroidChromeComposition = true;
+      handledCurrentComposition = false;
+      suppressBeforeInputInsertTextDuringComposition = false;
+    });
+
+    // Android Chrome composition handling for whitespace (space) to prevent DOM mutation breaking delimiters
+    $inner.on('compositionupdate', (evt) => {
+      const compLogPrefix = '[ep_data_tables:compositionHandler]';
+
+      if (!isAndroidChromiumUA()) return;
+
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) return;
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+
+      // Ensure we are inside a table line
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+      if (lineAttrString) { try { tableMetadata = JSON.parse(lineAttrString); } catch (_) {} }
+      if (!tableMetadata) tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number') return;
+
+      // Only act on whitespace-only composition updates (space/non-breaking space)
+      const d = evt.originalEvent && typeof evt.originalEvent.data === 'string' ? evt.originalEvent.data : '';
+      if (evt.type === 'compositionupdate') {
+        const isWhitespaceOnly = d && d.replace(/\u00A0/g, ' ').trim() === '';
+        if (!isWhitespaceOnly) return;
+
+        // Compute target cell and clamp selection to cell boundaries
+        const lineText = rep.lines.atIndex(lineNum)?.text || '';
+        const cells = lineText.split(DELIMITER);
+        let currentOffset = 0;
+        let targetCellIndex = -1;
+        let cellStartCol = 0;
+        let cellEndCol = 0;
+        for (let i = 0; i < cells.length; i++) {
+          const cellLength = cells[i]?.length ?? 0;
+          const cellEndColThisIteration = currentOffset + cellLength;
+          if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+            targetCellIndex = i;
+            cellStartCol = currentOffset;
+            cellEndCol = cellEndColThisIteration;
+            break;
+          }
+          currentOffset += cellLength + DELIMITER.length;
+        }
+        if (targetCellIndex === -1 || selEnd[1] > cellEndCol) return;
+
+        // Prevent composition DOM mutation and insert sanitized space via Ace
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+        let insertedText = d.replace(/\u00A0/g, ' ');
+        if (insertedText.length === 0) insertedText = ' ';
+
+        try {
+          setTimeout(() => {
+            ed.ace_callWithAce((aceInstance) => {
+              aceInstance.ace_fastIncorp(10);
+              const freshRep = aceInstance.ace_getRep();
+              const freshSelStart = freshRep.selStart;
+              const freshSelEnd = freshRep.selEnd;
+              aceInstance.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
+
+              // Clamp attribute application to current line bounds and use fresh line index
+              const repAfterReplace = aceInstance.ace_getRep();
+              const freshLineIndex = freshSelStart[0];
+              const freshLineEntry = repAfterReplace.lines.atIndex(freshLineIndex);
+              const maxLen = Math.max(0, (freshLineEntry && freshLineEntry.text) ? freshLineEntry.text.length : 0);
+              const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+              const endColRaw = startCol + insertedText.length;
+              const endCol = Math.min(endColRaw, maxLen);
+              if (endCol > startCol) {
+                aceInstance.ace_performDocumentApplyAttributesToRange(
+                  [freshLineIndex, startCol], [freshLineIndex, endCol], [[ATTR_CELL, String(targetCellIndex)]]
+                );
+              }
+
+              ed.ep_data_tables_applyMeta(
+                freshLineIndex,
+                tableMetadata.tblId,
+                tableMetadata.row,
+                tableMetadata.cols,
+                repAfterReplace,
+                ed,
+                null,
+                docManager
+              );
+
+              const newCaretCol = endCol;
+              const newCaretPos = [freshLineIndex, newCaretCol];
+              aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+              aceInstance.ace_fastIncorp(10);
+              if (editor && editor.ep_data_tables_last_clicked && editor.ep_data_tables_last_clicked.tblId === tableMetadata.tblId) {
+                // Recompute cellStartCol for fresh line
+                const freshLineText = (freshLineEntry && freshLineEntry.text) || '';
+                const freshCells = freshLineText.split(DELIMITER);
+                let freshOffset = 0;
+                for (let i = 0; i < targetCellIndex; i++) {
+                  freshOffset += (freshCells[i]?.length ?? 0) + DELIMITER.length;
+                }
+                const newRelativePos = newCaretCol - freshOffset;
+                editor.ep_data_tables_last_clicked = {
+                  lineNum: freshLineIndex,
+                  tblId: tableMetadata.tblId,
+                  cellIndex: targetCellIndex,
+                  relativePos: newRelativePos < 0 ? 0 : newRelativePos,
+                };
+              }
+            }, 'tableCompositionSpaceInsert', true);
+          }, 0);
+          // Suppress all subsequent beforeinput insertText events in this composition session
+          suppressBeforeInputInsertTextDuringComposition = true;
+        } catch (error) {
+          console.error(`${compLogPrefix} ERROR inserting space during composition:`, error);
+        }
+      }
+    });
+
+    // Composition end cleanup
+    $inner.on('compositionend', () => {
+      if (isAndroidChromeComposition) {
+        isAndroidChromeComposition = false;
+        handledCurrentComposition = false;
+        suppressBeforeInputInsertTextDuringComposition = false;
       }
     });
 
