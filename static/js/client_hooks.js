@@ -66,14 +66,13 @@ let isAndroidChromeComposition = false;
 let handledCurrentComposition = false;
 // Suppress all beforeinput insertText events during an Android Chrome IME composition
 let suppressBeforeInputInsertTextDuringComposition = false;
-// Helper to detect Android Chromium-family browsers (exclude iOS and Firefox)
-function isAndroidChromiumUA() {
+// Helper to detect any Android browser (exclude iOS/Safari)
+function isAndroidUA() {
   const ua = (navigator.userAgent || '').toLowerCase();
   const isAndroid = ua.includes('android');
   const isIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('crios');
-  const isFirefox = ua.includes('firefox');
-  const isChromiumFamily = ua.includes('chrome') || ua.includes('edg') || ua.includes('opr') || ua.includes('samsungbrowser') || ua.includes('vivaldi') || ua.includes('brave');
-  return isAndroid && !isIOS && !isFirefox && isChromiumFamily;
+  // Safari on Android is rare (WebKit ports), but our exclusion target is iOS Safari; we exclude all iOS above
+  return isAndroid && !isIOS;
 }
 
 // ─────────────────── Reusable Helper Functions ───────────────────
@@ -2196,7 +2195,7 @@ exports.aceInitialized = (h, ctx) => {
       // log(`${deleteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
 
       // Android Chrome IME: collapsed backspace/forward-delete often comes via beforeinput
-      const isAndroidChrome = isAndroidChromiumUA();
+      const isAndroidChrome = isAndroidUA();
       const inputType = (evt.originalEvent && evt.originalEvent.inputType) || '';
 
       // Handle collapsed deletes on Android Chrome inside a table line to protect delimiters
@@ -2449,8 +2448,8 @@ exports.aceInitialized = (h, ctx) => {
       // Only intercept insert types
       if (!inputType || !inputType.startsWith('insert')) return;
 
-      // Target only Android Chromium-family browsers (exclude iOS and Firefox)
-      if (!isAndroidChromiumUA()) return;
+      // Target only Android browsers (exclude iOS)
+      if (!isAndroidUA()) return;
 
       // Get current selection and ensure we are inside a table line
       const rep = ed.ace_getRep();
@@ -2615,7 +2614,7 @@ exports.aceInitialized = (h, ctx) => {
 
     // Composition start marker (Android Chrome/table only)
     $inner.on('compositionstart', (evt) => {
-      if (!isAndroidChromiumUA()) return;
+      if (!isAndroidUA()) return;
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
       const lineNum = rep.selStart[0];
@@ -2632,7 +2631,7 @@ exports.aceInitialized = (h, ctx) => {
     $inner.on('compositionupdate', (evt) => {
       const compLogPrefix = '[ep_data_tables:compositionHandler]';
 
-      if (!isAndroidChromiumUA()) return;
+      if (!isAndroidUA()) return;
 
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
