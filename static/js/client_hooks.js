@@ -17,6 +17,7 @@ const ATTR_TABLE_JSON = 'tbljson';
 const ATTR_CELL       = 'td';
 const ATTR_CLASS_PREFIX = 'tbljson-'; // For finding the class in DOM
 const log             = (...m) => console.debug('[ep_data_tables:client_hooks]', ...m);
+log('version 0.0.6');
 const DELIMITER       = '\u241F';   // Internal column delimiter (␟)
 // Use the same rare character inside the hidden span so acePostWriteDomLineHTML can
 // still find delimiters when it splits node.innerHTML.
@@ -66,13 +67,14 @@ let isAndroidChromeComposition = false;
 let handledCurrentComposition = false;
 // Suppress all beforeinput insertText events during an Android Chrome IME composition
 let suppressBeforeInputInsertTextDuringComposition = false;
-// Helper to detect any Android browser (exclude iOS/Safari)
-function isAndroidUA() {
+// Helper to detect Android Chromium-family browsers (exclude iOS and Firefox)
+function isAndroidChromiumUA() {
   const ua = (navigator.userAgent || '').toLowerCase();
   const isAndroid = ua.includes('android');
   const isIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('crios');
-  // Safari on Android is rare (WebKit ports), but our exclusion target is iOS Safari; we exclude all iOS above
-  return isAndroid && !isIOS;
+  const isFirefox = ua.includes('firefox');
+  const isChromiumFamily = ua.includes('chrome') || ua.includes('edg') || ua.includes('opr') || ua.includes('samsungbrowser') || ua.includes('vivaldi') || ua.includes('brave');
+  return isAndroid && !isIOS && !isFirefox && isChromiumFamily;
 }
 
 // ─────────────────── Reusable Helper Functions ───────────────────
@@ -964,11 +966,33 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // NEW: Remove all hidden-delimiter <span> wrappers **before** we split so
   // the embedded delimiter character they carry doesn't inflate or shrink
   // the segment count.
-  const spanDelimRegex = new RegExp('<span class="ep-data_tables-delim"[^>]*>' + DELIMITER + '<\\/span>', 'ig');
+  const spanDelimRegex = new RegExp('<span class="ep-data_tables-delim"[^>]*>' + DELIMITER + '</span>', 'ig');
+  // Safari-specific normalization: it may serialize the delimiter as entities and inject Apple spans
+  const delimiterEntityHexRE = /&#x241f;/ig;   // hex entity for U+241F
+  const delimiterEntityDecRE = /&#9247;/g;     // decimal entity for U+241F
+  const appleConvertedSpaceRE = /<span class="Apple-converted-space">[\s\u00A0]*<\/span>/ig;
+  const zeroWidthCharsRE = /[\u200B\u200C\u200D\uFEFF]/g;
+
+  const hexMatches = ((delimitedTextFromLine || '').match(delimiterEntityHexRE) || []).length;
+  const decMatches = ((delimitedTextFromLine || '').match(delimiterEntityDecRE) || []).length;
+  const appleSpaceMatches = ((delimitedTextFromLine || '').match(appleConvertedSpaceRE) || []).length;
+
   const sanitizedHTMLForSplit = (delimitedTextFromLine || '')
     .replace(spanDelimRegex, '')
     // strip caret anchors from raw line html before split
-    .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '');
+    .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '')
+    // Safari may serialize the delimiter as HTML entities – convert back to raw char
+    .replace(delimiterEntityHexRE, DELIMITER)
+    .replace(delimiterEntityDecRE, DELIMITER)
+    // Safari sometimes injects Apple-converted-space wrappers; collapse to a normal space
+    .replace(appleConvertedSpaceRE, ' ')
+    // Guard against invisible characters that can disturb splitting
+    .replace(zeroWidthCharsRE, '');
+
+  if ((hexMatches + decMatches + appleSpaceMatches) > 0) {
+    console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Normalized Safari entities/spans before splitting: hex=${hexMatches}, dec=${decMatches}, appleSpaces=${appleSpaceMatches}`);
+  }
+
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
   
   // log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT ANALYSIS ***`);
@@ -2195,7 +2219,7 @@ exports.aceInitialized = (h, ctx) => {
       // log(`${deleteLogPrefix} Current line number: ${lineNum}. Column start: ${selStart[1]}, Column end: ${selEnd[1]}.`);
 
       // Android Chrome IME: collapsed backspace/forward-delete often comes via beforeinput
-      const isAndroidChrome = isAndroidUA();
+      const isAndroidChrome = isAndroidChromiumUA();
       const inputType = (evt.originalEvent && evt.originalEvent.inputType) || '';
 
       // Handle collapsed deletes on Android Chrome inside a table line to protect delimiters
@@ -2448,8 +2472,8 @@ exports.aceInitialized = (h, ctx) => {
       // Only intercept insert types
       if (!inputType || !inputType.startsWith('insert')) return;
 
-      // Target only Android browsers (exclude iOS)
-      if (!isAndroidUA()) return;
+      // Target only Android Chromium-family browsers (exclude iOS and Firefox)
+      if (!isAndroidChromiumUA()) return;
 
       // Get current selection and ensure we are inside a table line
       const rep = ed.ace_getRep();
@@ -2614,7 +2638,7 @@ exports.aceInitialized = (h, ctx) => {
 
     // Composition start marker (Android Chrome/table only)
     $inner.on('compositionstart', (evt) => {
-      if (!isAndroidUA()) return;
+      if (!isAndroidChromiumUA()) return;
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
       const lineNum = rep.selStart[0];
@@ -2631,7 +2655,7 @@ exports.aceInitialized = (h, ctx) => {
     $inner.on('compositionupdate', (evt) => {
       const compLogPrefix = '[ep_data_tables:compositionHandler]';
 
-      if (!isAndroidUA()) return;
+      if (!isAndroidChromiumUA()) return;
 
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
