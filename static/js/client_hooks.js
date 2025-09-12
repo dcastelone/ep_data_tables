@@ -22,6 +22,8 @@ const DELIMITER       = '\u241F';   // Internal column delimiter (␟)
 // still find delimiters when it splits node.innerHTML.
 // Users never see this because the span is contenteditable=false and styled away.
 const HIDDEN_DELIM    = DELIMITER;
+// InputEvent inputTypes used by mobile autocorrect/IME commit
+const INPUTTYPE_REPLACEMENT_TYPES = new Set(['insertReplacementText', 'insertFromComposition']);
 
 // helper for stable random ids
 const rand = () => Math.random().toString(36).slice(2, 8);
@@ -73,6 +75,12 @@ function isAndroidUA() {
   const isIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('crios');
   // Safari on Android is rare (WebKit ports), but our exclusion target is iOS Safari; we exclude all iOS above
   return isAndroid && !isIOS;
+}
+
+// Helper to detect any iOS browser (Safari, Chrome iOS, Firefox iOS, Edge iOS)
+function isIOSUA() {
+  const ua = (navigator.userAgent || '').toLowerCase();
+  return ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('ios') || ua.includes('crios') || ua.includes('fxios') || ua.includes('edgios');
 }
 
 // ─────────────────── Reusable Helper Functions ───────────────────
@@ -734,6 +742,42 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
           ? `<span class="${encodedTbljsonClass ? `${encodedTbljsonClass} ` : ''}tblCell-${index}">${modifiedSegment}${caretAnchorSpan}</span>`
           : `${modifiedSegment}${caretAnchorSpan}`);
 
+    // Normalize: ensure first content span has correct tblCell-N and strip tblCell-* from subsequent spans
+    try {
+      const requiredCellClass = `tblCell-${index}`;
+      // Skip a leading delimiter span if present
+      const leadingDelimMatch = modifiedSegment.match(/^\s*<span[^>]*\bep-data_tables-delim\b[^>]*>[\s\S]*?<\/span>\s*/i);
+      const head = leadingDelimMatch ? leadingDelimMatch[0] : '';
+      const tail = leadingDelimMatch ? modifiedSegment.slice(head.length) : modifiedSegment;
+
+      const openSpanMatch = tail.match(/^\s*<span([^>]*)>/i);
+      if (!openSpanMatch) {
+        // No span at start: wrap with required cell class. Keep tbljson if available for stability.
+        const baseClasses = `${encodedTbljsonClass ? `${encodedTbljsonClass} ` : ''}${requiredCellClass}`;
+        modifiedSegment = `${head}<span class="${baseClasses}">${tail}</span>`;
+      } else {
+        const fullOpen = openSpanMatch[0];
+        const attrs = openSpanMatch[1] || '';
+        const classMatch = /\bclass\s*=\s*"([^"]*)"/i.exec(attrs);
+        let classList = classMatch ? classMatch[1].split(/\s+/).filter(Boolean) : [];
+        // Remove any stale tblCell-* from the first span's class list
+        classList = classList.filter(c => !/^tblCell-\d+$/.test(c));
+        // Ensure required cell class exists
+        classList.push(requiredCellClass);
+        const unique = Array.from(new Set(classList));
+        const newClassAttr = ` class="${unique.join(' ')}"`;
+        const attrsWithoutClass = classMatch ? attrs.replace(/\s*class\s*=\s*"[^"]*"/i, '') : attrs;
+        const rebuiltOpen = `<span${newClassAttr}${attrsWithoutClass}>`;
+        const afterOpen = tail.slice(fullOpen.length);
+        // Remove tblCell-* from any subsequent spans to avoid cascading mismatches (keep tbljson- as-is)
+        const cleanedTail = afterOpen.replace(/(<span[^>]*class=")([^"]*)(")/ig, (m, p1, classes, p3) => {
+          const filtered = classes.split(/\s+/).filter(c => c && !/^tblCell-\d+$/.test(c)).join(' ');
+          return p1 + filtered + p3;
+        });
+        modifiedSegment = head + rebuiltOpen + cleanedTail;
+      }
+    } catch (_) { /* ignore normalization errors */ }
+
     // Width & other decorations remain unchanged
     const widthPercent = columnWidths[index] || (100 / numCols);
     const cellStyle = `${tdStyle} width: ${widthPercent}%;`;
@@ -964,11 +1008,15 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   // NEW: Remove all hidden-delimiter <span> wrappers **before** we split so
   // the embedded delimiter character they carry doesn't inflate or shrink
   // the segment count.
-  const spanDelimRegex = new RegExp('<span class="ep-data_tables-delim"[^>]*>' + DELIMITER + '<\\/span>', 'ig');
+  // Preserve the delimiter character when stripping its wrapper span so splitting works
+  const spanDelimRegex = /<span class="ep-data_tables-delim"[^>]*>[\s\S]*?<\/span>/ig;
   const sanitizedHTMLForSplit = (delimitedTextFromLine || '')
-    .replace(spanDelimRegex, '')
+    .replace(spanDelimRegex, DELIMITER)
     // strip caret anchors from raw line html before split
-    .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '');
+    .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '')
+    .replace(/\r?\n/g, ' ')
+    .replace(/\u00A0/gu, ' ')
+    .replace(/<br\s*\/?>/gi, ' ');
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
   
  // log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT ANALYSIS ***`);
@@ -987,6 +1035,16 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     if (segment.includes('image:') || segment.includes('image-placeholder') || segment.includes('currently-selected')) {
      // log(`${logPrefix} NodeID#${nodeId}: *** SEGMENT[${i}] CONTAINS IMAGE CONTENT ***`);
     }
+    // Diagnostics: surface suspicious class patterns that can precede breakage
+    try {
+      const tblCellMatches = segment.match(/\btblCell-(\d+)\b/g) || [];
+      const tbljsonMatches = segment.match(/\btbljson-[A-Za-z0-9_-]+\b/g) || [];
+      const uniqueCells = Array.from(new Set(tblCellMatches));
+      if (uniqueCells.length > 1) {
+        console.warn('[ep_data_tables][diag] segment contains multiple tblCell-* markers', { segIndex: i, uniqueCells });
+      }
+      // intentionally ignore duplicate tbljson-* occurrences – not root cause
+    } catch (_) {}
   }
 
  // log(`${logPrefix} NodeID#${nodeId}: Parsed HTML segments (${htmlSegments.length}):`, htmlSegments.map(s => (s || '').substring(0,50) + (s && s.length > 50 ? '...' : '')));
@@ -996,7 +1054,8 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   
   if (htmlSegments.length !== rowMetadata.cols) {
      // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED *** - Attempting reconstruction.`);
-      
+     console.warn('[ep_data_tables][diag] Segment/column mismatch', { nodeId, lineNum, segs: htmlSegments.length, cols: rowMetadata.cols, tblId: rowMetadata.tblId, row: rowMetadata.row });
+     
       // Check if this is an image selection issue
       const hasImageSelected = delimitedTextFromLine.includes('currently-selected');
       const hasImageContent = delimitedTextFromLine.includes('image:');
@@ -1004,47 +1063,9 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
        // log(`${logPrefix} NodeID#${nodeId}: *** POTENTIAL CAUSE: Image selection state may be affecting segment parsing ***`);
       }
 
-      // First attempt: reconstruct using DOM spans that carry tblCell-N classes
+      // First attempt (DISABLED): class-based reconstruction caused content loss in real pads.
+      // We now rely on sanitized delimiter splitting and safe padding/truncation instead.
       let usedClassReconstruction = false;
-      try {
-        const cols = Math.max(0, Number(rowMetadata.cols) || 0);
-        const grouped = Array.from({ length: cols }, () => '');
-        const candidates = Array.from(node.querySelectorAll('[class*="tblCell-"]'));
-
-        const classNum = (el) => {
-          if (!el || !el.classList) return -1;
-          for (const cls of el.classList) {
-            const m = /^tblCell-(\d+)$/.exec(cls);
-            if (m) return parseInt(m[1], 10);
-          }
-          return -1;
-        };
-        const hasAncestorWithSameCell = (el, n) => {
-          let p = el?.parentElement;
-          while (p) {
-            if (p.classList && p.classList.contains(`tblCell-${n}`)) return true;
-            p = p.parentElement;
-          }
-          return false;
-        };
-
-        for (const el of candidates) {
-          const n = classNum(el);
-          if (n >= 0 && n < cols) {
-            if (!hasAncestorWithSameCell(el, n)) {
-              grouped[n] += el.outerHTML || '';
-            }
-          }
-        }
-        const usable = grouped.some(s => s && s.trim() !== '');
-        if (usable) {
-          finalHtmlSegments = grouped.map(s => (s && s.trim() !== '') ? s : '&nbsp;');
-          usedClassReconstruction = true;
-          console.warn(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Reconstructed ${finalHtmlSegments.length} segments from tblCell-N classes.`);
-        }
-      } catch (e) {
-        console.debug(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Class-based reconstruction error; falling back.`, e);
-      }
 
       // Fallback: reconstruct from string segments
       if (!usedClassReconstruction) {
@@ -2609,6 +2630,251 @@ exports.aceInitialized = (h, ctx) => {
         }, 0);
       } catch (error) {
         console.error(`${insertLogPrefix} ERROR during insert handling:`, error);
+      }
+    });
+
+    // Desktop (non-Android/iOS) – sanitize NBSP and table delimiter on any insert* beforeinput
+    $inner.on('beforeinput', (evt) => {
+      const genericLogPrefix = '[ep_data_tables:beforeinputInsertTextGeneric]';
+      const inputType = (evt.originalEvent && evt.originalEvent.inputType) || '';
+      // log diagnostics for all insert* types on table lines
+      if (!inputType || !inputType.startsWith('insert')) return;
+
+      // Skip on Android or iOS (they have dedicated handlers above)
+      if (isAndroidUA() || isIOSUA()) return;
+
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) return;
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+
+      // Ensure we are inside a table line by resolving metadata
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+      if (lineAttrString) {
+        try { tableMetadata = JSON.parse(lineAttrString); } catch (_) {}
+      }
+      if (!tableMetadata) tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number') return; // not a table line
+      console.debug(`${genericLogPrefix} event`, { inputType, data: evt.originalEvent && evt.originalEvent.data });
+
+      // Treat null data (composition/IME) as a single space to prevent NBSP/BR side effects
+      const rawData = evt.originalEvent && typeof evt.originalEvent.data === 'string' ? evt.originalEvent.data : ' ';
+
+      // Replace NBSP and delimiter with plain space, remove zero-width chars
+      const insertedText = rawData
+        .replace(/\u00A0/g, ' ')
+        .replace(new RegExp(DELIMITER, 'g'), ' ')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ');
+
+      if (!insertedText) { evt.preventDefault(); return; }
+
+      // Compute cell boundaries to keep selection within current cell
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+      for (let i = 0; i < cells.length; i++) {
+        const len = cells[i]?.length ?? 0;
+        const end = currentOffset + len;
+        if (selStart[1] >= currentOffset && selStart[1] <= end) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = end;
+          break;
+        }
+        currentOffset += len + DELIMITER.length;
+      }
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) { evt.preventDefault(); console.debug(`${genericLogPrefix} abort: selection outside cell`, { selStart, selEnd, cellStartCol, cellEndCol }); return; }
+
+      evt.preventDefault();
+      evt.stopPropagation();
+      if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+      try {
+        ed.ace_callWithAce((ace) => {
+          ace.ace_fastIncorp(10);
+          const freshRep = ace.ace_getRep();
+          const freshSelStart = freshRep.selStart;
+          const freshSelEnd = freshRep.selEnd;
+
+          ace.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
+
+          // Re-apply td attribute on inserted range
+          const afterRep = ace.ace_getRep();
+          const lineEntry = afterRep.lines.atIndex(lineNum);
+          const maxLen = lineEntry ? lineEntry.text.length : 0;
+          const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+          const endCol = Math.min(startCol + insertedText.length, maxLen);
+          if (endCol > startCol) {
+            ace.ace_performDocumentApplyAttributesToRange([lineNum, startCol], [lineNum, endCol], [[ATTR_CELL, String(targetCellIndex)]]);
+          }
+
+          // Re-apply tbljson line attribute
+          ed.ep_data_tables_applyMeta(lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, afterRep, ed, null, docManager);
+
+          // Move caret to end of inserted text
+          const newCaretPos = [lineNum, endCol];
+          ace.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+        }, 'tableGenericInsertText', true);
+      } catch (e) {
+        console.error(`${genericLogPrefix} ERROR handling generic insertText:`, e);
+      }
+    });
+
+    // iOS (all browsers) – intercept autocorrect/IME commit replacements to protect table structure
+    $inner.on('beforeinput', (evt) => {
+      const autoLogPrefix = '[ep_data_tables:beforeinputAutoReplaceHandler]';
+      const inputType = (evt.originalEvent && evt.originalEvent.inputType) || '';
+
+      // Only handle on iOS family UAs
+      if (!isIOSUA()) return;
+
+      // Intercept replacement/IME commit types; also catch iOS insertText when it behaves like autocorrect
+      const dataStr = (evt.originalEvent && typeof evt.originalEvent.data === 'string') ? evt.originalEvent.data : '';
+      const hasSelection = !(selStart[0] === selEnd[0] && selStart[1] === selEnd[1]);
+      const looksLikeIOSAutoReplace = inputType === 'insertText' && dataStr.length > 1; // multi-char commit (often replacement)
+      const shouldHandle = INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || looksLikeIOSAutoReplace || (inputType === 'insertText' && hasSelection);
+      if (!shouldHandle) return;
+
+      // Get current selection and ensure we are inside a table line
+      const rep = ed.ace_getRep();
+      if (!rep || !rep.selStart) return;
+      const selStart = rep.selStart;
+      const selEnd = rep.selEnd;
+      const lineNum = selStart[0];
+
+      // Resolve table metadata for this line
+      let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
+      let tableMetadata = null;
+      if (lineAttrString) {
+        try { tableMetadata = JSON.parse(lineAttrString); } catch (_) {}
+      }
+      if (!tableMetadata) tableMetadata = getTableLineMetadata(lineNum, ed, docManager);
+      if (!tableMetadata || typeof tableMetadata.cols !== 'number' || typeof tableMetadata.tblId === 'undefined' || typeof tableMetadata.row === 'undefined') {
+        return; // not a table line
+      }
+
+      // Compute cell boundaries and target cell index
+      const lineText = rep.lines.atIndex(lineNum)?.text || '';
+      const cells = lineText.split(DELIMITER);
+      let currentOffset = 0;
+      let targetCellIndex = -1;
+      let cellStartCol = 0;
+      let cellEndCol = 0;
+      for (let i = 0; i < cells.length; i++) {
+        const cellLength = cells[i]?.length ?? 0;
+        const cellEndColThisIteration = currentOffset + cellLength;
+        if (selStart[1] >= currentOffset && selStart[1] <= cellEndColThisIteration) {
+          targetCellIndex = i;
+          cellStartCol = currentOffset;
+          cellEndCol = cellEndColThisIteration;
+          break;
+        }
+        currentOffset += cellLength + DELIMITER.length;
+      }
+
+      // Clamp selection end if it includes a trailing delimiter of the same cell
+      if (targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length) {
+        selEnd[1] = cellEndCol;
+      }
+
+      // If selection spills outside the cell boundaries, block to protect structure
+      if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
+        evt.preventDefault();
+        return;
+      }
+
+      // Replacement text payload from beforeinput
+      let insertedText = dataStr;
+      if (!insertedText) {
+        // No payload: if this is a replacement/IME commit or selection is non-collapsed, block unsafe DOM mutation
+        if (INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || hasSelection) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+        }
+        return;
+      }
+
+      // Sanitize inserted text: remove our delimiter and zero-width characters; normalize whitespace
+      insertedText = insertedText
+        .replace(new RegExp(DELIMITER, 'g'), ' ')
+        .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+        .replace(/\s+/g, ' ');
+
+      // Intercept the browser default and perform the edit via Ace APIs
+      evt.preventDefault();
+      evt.stopPropagation();
+      if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+      try {
+        setTimeout(() => {
+          ed.ace_callWithAce((aceInstance) => {
+            aceInstance.ace_fastIncorp(10);
+            const freshRep = aceInstance.ace_getRep();
+            const freshSelStart = freshRep.selStart;
+            const freshSelEnd = freshRep.selEnd;
+
+            // Replace selection with sanitized text
+            aceInstance.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
+
+            // Re-apply cell attribute to the newly inserted text (clamped to line length)
+            const repAfterReplace = aceInstance.ace_getRep();
+            const freshLineIndex = freshSelStart[0];
+            const freshLineEntry = repAfterReplace.lines.atIndex(freshLineIndex);
+            const maxLen = Math.max(0, (freshLineEntry && freshLineEntry.text) ? freshLineEntry.text.length : 0);
+            const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+            const endColRaw = startCol + insertedText.length;
+            const endCol = Math.min(endColRaw, maxLen);
+            if (endCol > startCol) {
+              aceInstance.ace_performDocumentApplyAttributesToRange(
+                [freshLineIndex, startCol], [freshLineIndex, endCol], [[ATTR_CELL, String(targetCellIndex)]]
+              );
+            }
+
+            // Re-apply table metadata line attribute
+            ed.ep_data_tables_applyMeta(
+              freshLineIndex,
+              tableMetadata.tblId,
+              tableMetadata.row,
+              tableMetadata.cols,
+              repAfterReplace,
+              ed,
+              null,
+              docManager
+            );
+
+            // Move caret to end of inserted text and update last-click state
+            const newCaretCol = endCol;
+            const newCaretPos = [freshLineIndex, newCaretCol];
+            aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+            aceInstance.ace_fastIncorp(10);
+
+            if (editor && editor.ep_data_tables_last_clicked && editor.ep_data_tables_last_clicked.tblId === tableMetadata.tblId) {
+              // Recompute cellStartCol for fresh line
+              const freshLineText = (freshLineEntry && freshLineEntry.text) || '';
+              const freshCells = freshLineText.split(DELIMITER);
+              let freshOffset = 0;
+              for (let i = 0; i < targetCellIndex; i++) {
+                freshOffset += (freshCells[i]?.length ?? 0) + DELIMITER.length;
+              }
+              const newRelativePos = newCaretCol - freshOffset;
+              editor.ep_data_tables_last_clicked = {
+                lineNum: freshLineIndex,
+                tblId: tableMetadata.tblId,
+                cellIndex: targetCellIndex,
+                relativePos: newRelativePos < 0 ? 0 : newRelativePos,
+              };
+            }
+          }, 'tableAutoReplaceTextOperations', true);
+        }, 0);
+      } catch (error) {
+        console.error(`${autoLogPrefix} ERROR during auto-replace handling:`, error);
       }
     });
 
