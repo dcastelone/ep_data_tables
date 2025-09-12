@@ -1,6 +1,6 @@
 {
   "name": "ep_data_tables",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "description": "BETA - etherpad tables plugin, compatible with other character/line based styling and other features",
   "author": {
     "name": "DCastelone",

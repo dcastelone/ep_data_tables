@@ -679,7 +679,6 @@ function escapeHtml(text = '') {
   };
   return strText.replace(/[&<>"'']/g, function(m) { return map[m]; });
 }
-
 // NEW Helper function to build table HTML from pre-rendered delimited content with resize handles
 function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   const funcName = 'buildTableFromDelimitedHTML';
@@ -1154,7 +1153,6 @@ function _getLineNumberOfElement(element) {
     }
     return count;
 }
-
 // ───────────────────── Handle Key Events ─────────────────────
 exports.aceKeyEvent = (h, ctx) => {
   const funcName = 'aceKeyEvent';
@@ -1908,7 +1906,6 @@ exports.aceKeyEvent = (h, ctx) => {
  // log(`${logPrefix} [caretTrace] Final rep.selStart at end of aceKeyEvent (if unhandled): Line=${rep.selStart[0]}, Col=${rep.selStart[1]}`);
   return false; // Allow default browser/ACE handling
 };
-
 // ───────────────────── ace init + public helpers ─────────────────────
 exports.aceInitialized = (h, ctx) => {
   const logPrefix = '[ep_data_tables:aceInitialized]';
@@ -1972,6 +1969,121 @@ exports.aceInitialized = (h, ctx) => {
       }
       $inner = $(innerDocBody[0]); // Ensure it's a jQuery object of the body itself
      // log(`${callWithAceLogPrefix} Successfully found inner iframe body:`, $inner);
+
+      // ──────────────────────────────────────────────────────────────────────────────
+      // Mobile suggestion / autocorrect guard (Android and iOS)
+      // Many virtual keyboards commit the chosen suggestion AFTER the composition
+      // session has ended. This arrives as a second `beforeinput` (or `input` on
+      // Safari) with inputType = "insertReplacementText" or "insertFromComposition"
+      // – sometimes just plain "insertText" with isComposing=false. The default DOM
+      // mutation breaks our \u241F-delimited table lines, causing renderer failure.
+      //
+      // We intercept these in the capture phase, cancel the event, and inject a
+      // single safe space via Ace APIs so the caret advances but the table
+      // structure remains intact.
+      // ──────────────────────────────────────────────────────────────────────────────
+      const mobileSuggestionBlocker = (evt) => {
+        const t = evt && evt.inputType || '';
+        const dataStr = (evt && typeof evt.data === 'string') ? evt.data : '';
+        const isProblem = (
+          t === 'insertReplacementText' ||
+          t === 'insertFromComposition' ||
+          (t === 'insertText' && !evt.isComposing && (!dataStr || dataStr.length > 1))
+        );
+        if (!isProblem) return;
+
+        // Only act if selection is inside a table line
+        try {
+          const repQuick = ed.ace_getRep && ed.ace_getRep();
+          if (!repQuick || !repQuick.selStart) return; // don't block outside editor selection
+          const lineNumQuick = repQuick.selStart[0];
+          let metaStrQuick = docManager && docManager.getAttributeOnLine
+            ? docManager.getAttributeOnLine(lineNumQuick, ATTR_TABLE_JSON)
+            : null;
+          let metaQuick = null;
+          if (metaStrQuick) { try { metaQuick = JSON.parse(metaStrQuick); } catch (_) {} }
+          if (!metaQuick) metaQuick = getTableLineMetadata(lineNumQuick, ed, docManager);
+          if (!metaQuick || typeof metaQuick.cols !== 'number') return; // not a table line → do not block
+        } catch (_) { return; }
+
+        // Cancel the browser's DOM mutation early
+        evt.preventDefault();
+        if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+        // Replace selection with a single plain space using Ace APIs
+        setTimeout(() => {
+          try {
+            ed.ace_callWithAce((aceInstance) => {
+              aceInstance.ace_fastIncorp(10);
+              const rep = aceInstance.ace_getRep();
+              if (!rep || !rep.selStart) return;
+              const lineNum = rep.selStart[0];
+
+              // Perform the safe insertion
+              aceInstance.ace_performDocumentReplaceRange(rep.selStart, rep.selEnd, ' ');
+
+              // Try to re-apply table metadata attribute to stabilize renderer
+              try {
+                let metaStr = docManager && docManager.getAttributeOnLine
+                  ? docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON)
+                  : null;
+                let meta = null;
+                if (metaStr) { try { meta = JSON.parse(metaStr); } catch (_) {} }
+                if (!meta) meta = getTableLineMetadata(lineNum, ed, docManager);
+                if (meta && typeof meta.tblId !== 'undefined' && typeof meta.row !== 'undefined' && typeof meta.cols === 'number') {
+                  const repAfter = aceInstance.ace_getRep();
+                  ed.ep_data_tables_applyMeta(lineNum, meta.tblId, meta.row, meta.cols, repAfter, ed, null, docManager);
+                }
+              } catch (_) {}
+            }, 'mobileSuggestionBlocker', true);
+          } catch (e) {
+            console.error('[ep_data_tables:mobileSuggestionBlocker] Error inserting space:', e);
+          }
+        }, 0);
+      };
+
+      // Listen in capture phase so we win the race with browser/default handlers
+      if ($inner && $inner.length > 0 && $inner[0].addEventListener) {
+        $inner[0].addEventListener('beforeinput', mobileSuggestionBlocker, true);
+      }
+
+      // Fallback for Safari iOS which may not emit beforeinput reliably: use input
+      if ($inner && $inner.length > 0 && $inner[0].addEventListener) {
+        $inner[0].addEventListener('input', (evt) => {
+          // Only run if we did NOT already block in beforeinput
+          if (evt && evt.inputType === 'insertText' && typeof evt.data === 'string' && evt.data.length > 1) {
+            mobileSuggestionBlocker(evt);
+          }
+        }, true);
+      }
+
+      // Android legacy fallback: some keyboards dispatch 'textInput' instead of beforeinput
+      if (isAndroidUA && isAndroidUA() && $inner && $inner.length > 0 && $inner[0].addEventListener) {
+        $inner[0].addEventListener('textInput', (evt) => {
+          const s = typeof evt.data === 'string' ? evt.data : '';
+          if (s && s.length > 1) {
+            mobileSuggestionBlocker({
+              inputType: 'insertText',
+              isComposing: false,
+              data: s,
+              preventDefault: () => { try { evt.preventDefault(); } catch (_) {} },
+              stopImmediatePropagation: () => { try { evt.stopImmediatePropagation(); } catch (_) {} },
+            });
+          }
+        }, true);
+      }
+
+      // Reduce chance of autocorrect/spellcheck kicking in at all
+      try {
+        const disableAuto = (el) => {
+          if (!el) return;
+          el.setAttribute('autocorrect', 'off');
+          el.setAttribute('autocomplete', 'off');
+          el.setAttribute('autocapitalize', 'off');
+          el.setAttribute('spellcheck', 'false');
+        };
+        disableAuto(innerDocBody[0] || innerDocBody);
+      } catch (_) {}
     } catch (e) {
       console.error(`${callWithAceLogPrefix} ERROR: Exception while trying to find inner iframe body:`, e);
      // log(`${callWithAceLogPrefix} Exception details:`, { message: e.message, stack: e.stack });
@@ -2509,15 +2621,58 @@ exports.aceInitialized = (h, ctx) => {
         currentOffset += cellLength + DELIMITER.length;
       }
 
-      // Clamp selection end if it includes a trailing delimiter of the same cell
-      if (targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length) {
-        selEnd[1] = cellEndCol;
-      }
-
       // If selection spills outside the cell boundaries, block to protect structure
       if (targetCellIndex === -1 || selEnd[1] > cellEndCol) {
         evt.preventDefault();
         return;
+      }
+
+      // iOS soft break (insertParagraph/insertLineBreak) → replace with plain space via Ace
+      if (inputType === 'insertParagraph' || inputType === 'insertLineBreak') {
+        evt.preventDefault();
+        evt.stopPropagation();
+        if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+        setTimeout(() => {
+          try {
+            ed.ace_callWithAce((aceInstance) => {
+              aceInstance.ace_fastIncorp(10);
+              const freshRep = aceInstance.ace_getRep();
+              const freshSelStart = freshRep.selStart;
+              const freshSelEnd = freshRep.selEnd;
+              // Replace soft break with space
+              aceInstance.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, ' ');
+
+              // Apply td attr to inserted space
+              const afterRep = aceInstance.ace_getRep();
+              const maxLen = Math.max(0, afterRep.lines.atIndex(lineNum)?.text?.length || 0);
+              const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+              const endCol = Math.min(startCol + 1, maxLen);
+              if (endCol > startCol) {
+                aceInstance.ace_performDocumentApplyAttributesToRange(
+                  [lineNum, startCol], [lineNum, endCol], [[ATTR_CELL, String(targetCellIndex)]]
+                );
+              }
+
+              // Re-apply line metadata
+              ed.ep_data_tables_applyMeta(
+                lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols,
+                afterRep, ed, null, docManager
+              );
+
+              const newCaretPos = [lineNum, endCol];
+              aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+              aceInstance.ace_fastIncorp(10);
+            }, 'iosSoftBreakToSpace', true);
+          } catch (e) {
+            console.error(`${autoLogPrefix} ERROR replacing soft break:`, e);
+          }
+        }, 0);
+        return;
+      }
+
+      // Clamp selection end if it includes a trailing delimiter of the same cell
+      if (targetCellIndex !== -1 && selEnd[1] === cellEndCol + DELIMITER.length) {
+        selEnd[1] = cellEndCol;
       }
 
       // Handle line breaks by routing to Enter behavior
@@ -2734,19 +2889,20 @@ exports.aceInitialized = (h, ctx) => {
       // Only handle on iOS family UAs
       if (!isIOSUA()) return;
 
-      // Intercept replacement/IME commit types; also catch iOS insertText when it behaves like autocorrect
-      const dataStr = (evt.originalEvent && typeof evt.originalEvent.data === 'string') ? evt.originalEvent.data : '';
-      const hasSelection = !(selStart[0] === selEnd[0] && selStart[1] === selEnd[1]);
-      const looksLikeIOSAutoReplace = inputType === 'insertText' && dataStr.length > 1; // multi-char commit (often replacement)
-      const shouldHandle = INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || looksLikeIOSAutoReplace || (inputType === 'insertText' && hasSelection);
-      if (!shouldHandle) return;
-
-      // Get current selection and ensure we are inside a table line
+      // Get current selection and ensure we are inside a table line (define before computing hasSelection)
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
       const selStart = rep.selStart;
       const selEnd = rep.selEnd;
       const lineNum = selStart[0];
+
+      // Intercept replacement/IME commit types; also catch iOS insertText when it behaves like autocorrect
+      const dataStr = (evt.originalEvent && typeof evt.originalEvent.data === 'string') ? evt.originalEvent.data : '';
+      const hasSelection = !(selStart[0] === selEnd[0] && selStart[1] === selEnd[1]);
+      const looksLikeIOSAutoReplace = inputType === 'insertText' && dataStr.length > 1; // multi-char commit (often replacement)
+      const insertTextNull = inputType === 'insertText' && dataStr === '' && !hasSelection; // predictive commit with null data (often NBSP)
+      const shouldHandle = INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || looksLikeIOSAutoReplace || (inputType === 'insertText' && (hasSelection || insertTextNull));
+      if (!shouldHandle) return;
 
       // Resolve table metadata for this line
       let lineAttrString = docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON);
@@ -2792,13 +2948,58 @@ exports.aceInitialized = (h, ctx) => {
       // Replacement text payload from beforeinput
       let insertedText = dataStr;
       if (!insertedText) {
-        // No payload: if this is a replacement/IME commit or selection is non-collapsed, block unsafe DOM mutation
-        if (INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || hasSelection) {
+        if (insertTextNull) {
+          // Predictive text commit: Safari already mutated DOM (&nbsp;<br>). Block and repair via Ace.
           evt.preventDefault();
           evt.stopPropagation();
           if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+
+          setTimeout(() => {
+            try {
+              ed.ace_callWithAce((aceInstance) => {
+                aceInstance.ace_fastIncorp(10);
+                const freshRep = aceInstance.ace_getRep();
+                const freshSelStart = freshRep.selStart;
+                const freshSelEnd = freshRep.selEnd;
+                // Insert a plain space
+                aceInstance.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, ' ');
+
+                // Re-apply cell attribute to the single inserted char
+                const afterRep = aceInstance.ace_getRep();
+                const maxLen = Math.max(0, afterRep.lines.atIndex(lineNum)?.text?.length || 0);
+                const startCol = Math.min(Math.max(freshSelStart[1], 0), maxLen);
+                const endCol = Math.min(startCol + 1, maxLen);
+                if (endCol > startCol) {
+                  aceInstance.ace_performDocumentApplyAttributesToRange(
+                    [lineNum, startCol], [lineNum, endCol], [[ATTR_CELL, String(targetCellIndex)]]
+                  );
+                }
+
+                // Re-apply table metadata line attribute
+                ed.ep_data_tables_applyMeta(
+                  lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols,
+                  afterRep, ed, null, docManager
+                );
+
+                // Move caret to end of inserted text
+                const newCaretPos = [lineNum, endCol];
+                aceInstance.ace_performSelectionChange(newCaretPos, newCaretPos, false);
+                aceInstance.ace_fastIncorp(10);
+              }, 'iosPredictiveCommit', true);
+            } catch (e) {
+              console.error(`${autoLogPrefix} ERROR fixing predictive commit:`, e);
+            }
+          }, 0);
+          return;
+        } else {
+          // No payload and not special: if it's a replacement, block default to avoid DOM mutation
+          if (INPUTTYPE_REPLACEMENT_TYPES.has(inputType) || hasSelection) {
+            evt.preventDefault();
+            evt.stopPropagation();
+            if (typeof evt.stopImmediatePropagation === 'function') evt.stopImmediatePropagation();
+          }
+          return;
         }
-        return;
       }
 
       // Sanitize inserted text: remove our delimiter and zero-width characters; normalize whitespace
@@ -2892,7 +3093,6 @@ exports.aceInitialized = (h, ctx) => {
       handledCurrentComposition = false;
       suppressBeforeInputInsertTextDuringComposition = false;
     });
-
     // Android Chrome composition handling for whitespace (space) to prevent DOM mutation breaking delimiters
     $inner.on('compositionupdate', (evt) => {
       const compLogPrefix = '[ep_data_tables:compositionHandler]';
@@ -4388,7 +4588,6 @@ exports.aceInitialized = (h, ctx) => {
       return false;
     }
   }
-  
   function deleteTableColumnWithText(tableLines, targetColIndex, editorInfo, docManager) {
     try {
       // Update text content for all table lines using precise character deletion
