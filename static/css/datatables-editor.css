@@ -1,167 +1,128 @@
-/*
- * CSS rules specifically for styling tables within the Etherpad editor iframe.
- */
-
-/* Prevent default background highlight on the TD itself if an author class is present */
 .dataTable td[class*="author-"] { 
-    background-color: transparent !important; 
-    border: 1px solid transparent; /* Maintain border for consistency if needed */
+  background-color: transparent !important; 
+  border: 1px solid transparent; 
 }
 
-/* Ensure the author span (added by acePostWriteDomLineHTML) displays correctly */
 .dataTable td span[data-author-span="true"] { 
-    display: inline; 
-    text-decoration: none !important; /* Remove potential underlines */
-    /* Text color should ideally be inherited or applied dynamically if Etherpad supports it, 
-       otherwise, it might need to be handled explicitly in acePostWriteDomLineHTML if this CSS isn't sufficient.
-       The aceSetAuthorStyle hook returning true aims to stop the default background color, 
-       allowing text color styling (potentially handled by core etherpad based on author class) to take precedence. */
+  display: inline; 
+  text-decoration: none !important; 
 } 
 
-/* NEW STYLES FOR ATTRIBUTE-BASED TABLES */
-
-/* Applied directly to the rendered table */
 .dataTable {
-  width: 100%; /* Ensure table takes full width */
-  border-collapse: collapse; /* Collapse borders */
-  table-layout: fixed; /* Ensure equal column widths unless specified */
-  /* margin-bottom: 1px; */ /* REMOVED - Likely caused gaps between rows */
-  border: 1px solid black; /* Apply border to the table itself */
-  border-top: none; /* REMOVE top border to prevent double lines between rows */
+width: 100%; 
+border-collapse: collapse; 
+table-layout: fixed; 
+border: 1px solid black; 
+border-top: none; 
 }
 
-/* Restore top border ONLY for the first table row in a block */
 .dataTable.dataTable-first-row {
-  border-top: 1px solid black;
+border-top: 1px solid black;
 }
 
-/* Style the table rows */
+
 .dataTable tr {
-  height: 36px; /* Set fixed row height */
-  min-height: 36px; /* Ensure minimum row height */
+height: 36px; 
+min-height: 36px; 
 }
 
 .dataTable td {
-  /* border: 1px solid black !important; */ /* REMOVED - Moved to .dataTable */
-  /* min-height: 36px; */ /* REMOVED - Moved to .dataTable tr */
-  vertical-align: top; /* Align content to top */
-  word-wrap: break-word; /* Wrap long words */
-  /* Padding will be kept inline via JS for now */
-  /* Add internal cell borders if desired (looks better with collapsed borders) */
-  border-left: 1px solid black;
-  border-right: 1px solid black;
+vertical-align: top;
+white-space: normal;
+word-break: break-word;
+overflow-wrap: anywhere;
+border-left: 1px solid black;
+border-right: 1px solid black;
 }
 
-/* Remove outer border from first/last cells if table border is set */
+.dataTable td * {
+white-space: inherit;
+word-break: inherit;
+overflow-wrap: inherit;
+}
+
 .dataTable td:first-child {
-  border-left: none;
+border-left: none;
 }
 .dataTable td:last-child {
-  border-right: none;
+border-right: none;
 }
 
-/* Style the line DIV as a table row */
-/* Commenting out previous attempt as block/inline-block above is simpler for now
-.ep-table-row {
-  display: table-row !important; 
-  width: 100%; 
-}
-*/
 
-/* Style the cell wrapper spans as table cells */
-/* Commenting out previous attempt
-.ep-table-cell {
-  display: table-cell !important; 
-  padding: 2px 4px; 
-  border: 1px solid #ccc; 
-  vertical-align: inherit; 
-  height: auto; 
-}
-*/
-
-/* Ensure delimiters themselves are not visible */
 .table-cell-delimiter {
-  display: none !important;
+display: none !important;
 }
 
 .ep-table-row-line > .list-bullet,
 .list-table-row     > .list-bullet {
-  display: none !important;
+display: none !important;
 } 
 
-/* Hide the injected delimiter span */
 .ep-data_tables-delim {
-  font-size:0;
-  line-height:0;
-  color:transparent;
-  pointer-events:none;
-  user-select:none;
-  caret-color:transparent;
+font-size:0;
+line-height:0;
+color:transparent;
+pointer-events:none;
+user-select:none;
+caret-color:transparent;
 } 
 
-/* NEW: Column resize handle styles */
 .ep-data_tables-resize-handle {
-  position: absolute;
-  top: 0;
-  right: -2px;
-  width: 4px;
-  height: 100%;
-  cursor: col-resize;
-  background: transparent;
-  z-index: 10;
-  opacity: 0;
-  transition: opacity 0.2s ease;
+position: absolute;
+top: 0;
+right: -2px;
+width: 4px;
+height: 100%;
+cursor: col-resize;
+background: transparent;
+z-index: 10;
+opacity: 0;
+transition: opacity 0.2s ease;
 }
 
 
-
-/* Show resize handles on hover */
 .dataTable tr:first-child td:hover .ep-data_tables-resize-handle,
 .dataTable tr:first-child .ep-data_tables-resize-handle:hover {
-  opacity: 0.3;
-  background: #007cff;
+opacity: 0.3;
+background: #007cff;
 }
 
-/* Visual feedback during resize */
 .dataTable.ep-data_tables-resizing {
-  user-select: none;
-  -webkit-user-select: none;
-  -moz-user-select: none;
-  -ms-user-select: none;
-  pointer-events: none; /* Prevent other interactions during resize */
+user-select: none;
+-webkit-user-select: none;
+-moz-user-select: none;
+-ms-user-select: none;
+pointer-events: none; 
 }
 
 .dataTable.ep-data_tables-resizing td {
-  transition: none !important;
-  pointer-events: none; /* Prevent cell interactions during resize */
+transition: none !important;
+pointer-events: none;
 }
 
 .dataTable.ep-data_tables-resizing .ep-data_tables-resize-handle {
-  opacity: 0.7 !important;
-  background: #007cff !important;
-  pointer-events: auto; /* Keep resize handle interactive */
+opacity: 0.7 !important;
+background: #007cff !important;
+pointer-events: auto; 
 }
 
-/* Improve resize handle visibility on first row */
 .dataTable.dataTable-first-row tr:first-child td {
-  position: relative;
+position: relative;
 }
 
-/* Ensure resize handles don't interfere with text selection */
 .ep-data_tables-resize-handle:hover {
-  background: #007cff !important;
-  opacity: 0.5 !important;
+background: #007cff !important;
+opacity: 0.5 !important;
 }
 
-/* Add a visual indicator during resize */
 .dataTable.ep-data_tables-resizing::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(0, 124, 255, 0.05);
-  pointer-events: none;
-  z-index: 5;
+content: '';
+position: absolute;
+top: 0;
+left: 0;
+right: 0;
+bottom: 0;
+background: rgba(0, 124, 255, 0.05);
+pointer-events: none;
+z-index: 5;
 } 
