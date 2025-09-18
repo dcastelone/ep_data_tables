@@ -43,8 +43,11 @@ let suppressBeforeInputInsertTextDuringComposition = false;
 function isAndroidUA() {
   const ua = (navigator.userAgent || '').toLowerCase();
   const isAndroid = ua.includes('android');
+  // Treat Chrome OS (Chromebooks) similarly because touch-screen Chromebooks exhibit the same
+  // duplicate beforeinput / composition quirks we patch for Android.
+  const isChromeOS = ua.includes('cros'); // "CrOS" token present in Chromebook UAs
   const isIOS = ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod') || ua.includes('crios');
-  return isAndroid && !isIOS;
+  return (isAndroid || isChromeOS) && !isIOS;
 }
 
 function isIOSUA() {
@@ -1656,6 +1659,14 @@ exports.aceInitialized = (h, ctx) => {
   const ed = ctx.editorInfo;
   const docManager = ctx.documentAttributeManager;
 
+  try {
+    if (typeof window !== 'undefined') {
+      window.__epDataTablesReady = true;
+      const guard = document.getElementById('ep-data-tables-guard');
+      if (guard && guard.parentNode) guard.parentNode.removeChild(guard);
+    }
+  } catch (_) {}
+
  // log(`${logPrefix} Attaching ep_data_tables_applyMeta helper to editorInfo.`);
   ed.ep_data_tables_applyMeta = applyTableLineMetadataAttribute;
  // log(`${logPrefix}: Attached applyTableLineMetadataAttribute helper to ed.ep_data_tables_applyMeta successfully.`);
@@ -1926,8 +1937,8 @@ exports.aceInitialized = (h, ctx) => {
           if (!e || e._epDataTablesNormalized) return;
           const t = e.inputType || '';
           const dataStr = typeof e.data === 'string' ? e.data : '';
-          const hasLF = /[\r\n]/.test(dataStr);
-          const isSoftBreak = t === 'insertParagraph' || t === 'insertLineBreak' || hasLF;
+          const hasSoftWs = /[\r\n\u00A0]/.test(dataStr); // include NBSP (U+00A0)
+          const isSoftBreak = t === 'insertParagraph' || t === 'insertLineBreak' || hasSoftWs;
           if (!isSoftBreak) return;
 
           const rep = ed.ace_getRep && ed.ace_getRep();
@@ -2265,11 +2276,39 @@ exports.aceInitialized = (h, ctx) => {
         evt.preventDefault();
         try {
           ed.ace_callWithAce((aceInstance) => {
+            // Refresh representation to account for any prior synchronous edits
+            aceInstance.ace_fastIncorp(10);
+            const freshRep = aceInstance.ace_getRep();
+
+            const freshLineEntry = freshRep.lines.atIndex(lineNum);
+            const freshText = (freshLineEntry && freshLineEntry.text) || '';
+            const freshCells = freshText.split(DELIMITER);
+
+            let offset = 0;
+            let freshCellStart = 0;
+            let freshCellEnd = 0;
+            for (let i = 0; i < freshCells.length; i++) {
+              const len = freshCells[i]?.length ?? 0;
+              const end = offset + len;
+              if (i === targetCellIndex) {
+                freshCellStart = offset;
+                freshCellEnd = end;
+                break;
+              }
+              offset += len + DELIMITER.length;
+            }
+
+            // If caret is flush against delimiter after refresh, abort to protect structure
+            if ((isBackward && caretCol <= freshCellStart) || (!isBackward && caretCol >= freshCellEnd)) {
+              return;
+            }
+
             const delStart = isBackward ? [lineNum, caretCol - 1] : [lineNum, caretCol];
             const delEnd   = isBackward ? [lineNum, caretCol]     : [lineNum, caretCol + 1];
             aceInstance.ace_performDocumentReplaceRange(delStart, delEnd, '');
 
             const repAfter = aceInstance.ace_getRep();
+
             ed.ep_data_tables_applyMeta(
               lineNum,
               tableMetadata.tblId,
