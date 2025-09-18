@@ -26,6 +26,56 @@ const dec = s => {
     }
 };
 
+const TBLJSON_CLASS_RE = /\btbljson-([A-Za-z0-9_-]+)/;
+
+const toClassTokens = (classSource) => {
+  if (!classSource) return [];
+  if (typeof classSource === 'string') {
+    return classSource.trim().split(/\s+/).filter(Boolean);
+  }
+  if (Array.isArray(classSource)) return classSource.filter(Boolean);
+  if (typeof classSource === 'object' && typeof classSource.length === 'number') {
+    return Array.from(classSource, (token) => `${token}`).filter(Boolean);
+  }
+  return [];
+};
+
+const extractEncodedTbljson = (classSource) => {
+  for (const token of toClassTokens(classSource)) {
+    const match = TBLJSON_CLASS_RE.exec(token);
+    if (match) return match[1];
+  }
+  return null;
+};
+
+const isWellFormedMetadata = (metadata) => (
+  metadata &&
+  typeof metadata.tblId !== 'undefined' &&
+  typeof metadata.row !== 'undefined' &&
+  typeof metadata.cols === 'number'
+);
+
+const decodeTbljsonClass = (classSource) => {
+  const encoded = extractEncodedTbljson(classSource);
+  if (!encoded) return null;
+  const json = dec(encoded);
+  if (!json) return null;
+  let metadata = null;
+  let parseError = null;
+  try {
+    metadata = JSON.parse(json);
+  } catch (err) {
+    parseError = err;
+  }
+  return {
+    encoded,
+    json,
+    metadata,
+    isWellFormed: isWellFormedMetadata(metadata),
+    error: parseError,
+  };
+};
+
 let lastClickedCellInfo = null;
 let isResizing = false;
 let resizeStartX = 0;
@@ -65,18 +115,14 @@ const normalizeSoftWhitespace = (str) => (
  */
 function findTbljsonElement(element) {
   if (!element) return null;
-  if (element.classList) {
-    for (const cls of element.classList) {
-      if (cls.startsWith(ATTR_CLASS_PREFIX)) {
-        return element;
-      }
-    }
+  if (extractEncodedTbljson(element.classList || element.className || '')) {
+    return element;
   }
-  if (element.children) {
-    for (const child of element.children) {
-      const found = findTbljsonElement(child);
-      if (found) return found;
-    }
+  const {children} = element;
+  if (!children || !children.length) return null;
+  for (const child of children) {
+    const found = findTbljsonElement(child);
+    if (found) return found;
   }
   return null;
 }
@@ -118,18 +164,14 @@ function getTableLineMetadata(lineNum, editorInfo, docManager) {
 
     const tbljsonElement = findTbljsonElement(lineNode);
     if (tbljsonElement) {
-      for (const className of tbljsonElement.classList) {
-        if (className.startsWith(ATTR_CLASS_PREFIX)) {
-          const encodedData = className.substring(ATTR_CLASS_PREFIX.length);
-          try {
-            const decodedString = atob(encodedData);
-            const metadata = JSON.parse(decodedString);
-           // log(`${funcName}: Reconstructed metadata from DOM for line ${lineNum}:`, metadata);
-            return metadata;
-          } catch (e) {
-            console.error(`${funcName}: Failed to decode/parse tbljson class on line ${lineNum}:`, e);
-            return null;
-          }
+      const info = decodeTbljsonClass(tbljsonElement.classList || tbljsonElement.className || '');
+      if (info) {
+        if (info.metadata && info.metadata.tblId) {
+         // log(`${funcName}: Reconstructed metadata from DOM for line ${lineNum}:`, info.metadata);
+          return info.metadata;
+        }
+        if (info.error) {
+          console.error(`${funcName}: Failed to decode/parse tbljson class on line ${lineNum}:`, info.error);
         }
       }
     }
@@ -518,36 +560,27 @@ exports.collectContentPre = (hook, ctx) => {
   }
 
 
-  const classes = ctx.cls ? ctx.cls.split(' ') : [];
+  const encodedFromCls = extractEncodedTbljson(ctx.cls || '');
   let appliedAttribFromClass = false;
-  if (classes.length > 0) {
-   // log(`${funcName}: Secondary path - Checking classes on node ${node?.tagName}.${node?.className}: [${classes.join(', ')}]`);
-  for (const cls of classes) {
-    if (cls.startsWith('tbljson-')) {
-       // log(`${funcName}: Secondary path - Found tbljson class: ${cls} on node ${node?.tagName}.${node?.className}`);
-        const encodedMetadata = cls.substring(8);
-      try {
-        const decodedMetadata = dec(encodedMetadata);
-        if (decodedMetadata) {
-          cc.doAttrib(state, `${ATTR_TABLE_JSON}::${decodedMetadata}`);
-            appliedAttribFromClass = true;
-           // log(`${funcName}: Secondary path - Applied attribute to OP via cc.doAttrib for class ${cls.substring(0, 20)}... on ${node?.tagName}`);
-          } else {
-           // log(`${funcName}: Secondary path - ERROR - Decoded metadata is null or empty for class ${cls}`);
+  if (encodedFromCls) {
+   // log(`${funcName}: Secondary path - Found encoded metadata on node ${node?.tagName}.${node?.className}`);
+    const info = decodeTbljsonClass(ctx.cls || '');
+    if (info) {
+      if (!info.isWellFormed) {
+        if (info.error) {
+          console.warn(`[ep_data_tables] ${funcName}: Decoded tbljson class could not be parsed as JSON.`, info.error);
+        } else {
+          console.warn(`[ep_data_tables] ${funcName}: Decoded tbljson metadata is missing required fields.`, info.metadata);
         }
-      } catch (e) {
-          console.error(`[ep_data_tables] ${funcName}: Secondary path - Error processing tbljson class ${cls} on ${node?.tagName}:`, e);
       }
-        break; 
-      }
-    }
-    if (!appliedAttribFromClass && classes.some(c => c.startsWith('tbljson-'))) {
-       // log(`${funcName}: Secondary path - Found tbljson- class but failed to apply attribute.`);
-    } else if (!classes.some(c => c.startsWith('tbljson-'))) {
-       // log(`${funcName}: Secondary path - No tbljson- class found on this node.`);
+      cc.doAttrib(state, `${ATTR_TABLE_JSON}::${info.json}`);
+      appliedAttribFromClass = true;
+     // log(`${funcName}: Secondary path - Applied attribute to OP via cc.doAttrib.`);
+    } else {
+      console.warn(`[ep_data_tables] ${funcName}: Failed to decode tbljson metadata from classes on ${node?.tagName}.`);
     }
   } else {
-    // log(`${funcName}: Secondary path - Node ${node?.tagName}.${node?.className} has no ctx.cls or classes array is empty.`);
+    // log(`${funcName}: Secondary path - No tbljson- class found on this node.`);
   }
 
  // log(`${funcName}: *** EXIT POINT *** For Node: ${node?.tagName}.${node?.className}. Applied from class: ${appliedAttribFromClass}`);
@@ -722,55 +755,15 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   }
 
   let rowMetadata = null;
-  let encodedJsonString = null;
-
- // log(`${logPrefix} NodeID#${nodeId}: Searching for tbljson-* class...`);
-
-  function findTbljsonClass(element, depth = 0, path = '') {
-    const indent = '  '.repeat(depth);
-   // log(`${logPrefix} NodeID#${nodeId}: ${indent}Searching element: ${element.tagName || 'unknown'}, path: ${path}`);
-
-    if (element.classList) {
-     // log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has ${element.classList.length} classes: [${Array.from(element.classList).join(', ')}]`);
-      for (const cls of element.classList) {
-          if (cls.startsWith('tbljson-')) {
-         // log(`${logPrefix} NodeID#${nodeId}: ${indent}*** FOUND TBLJSON CLASS: ${cls.substring(8)} at depth ${depth}, path: ${path} ***`);
-          return cls.substring(8);
-        }
-      }
-    } else {
-     // log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has no classList`);
+  let metadataInfo = decodeTbljsonClass(node.classList || node.className || '');
+  if (!metadataInfo) {
+    const tbljsonElement = findTbljsonElement(node);
+    if (tbljsonElement && tbljsonElement !== node) {
+      metadataInfo = decodeTbljsonClass(tbljsonElement.classList || tbljsonElement.className || '');
     }
-
-    if (element.children) {
-     // log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has ${element.children.length} children`);
-      for (let i = 0; i < element.children.length; i++) {
-        const child = element.children[i];
-        const childPath = `${path}>${child.tagName}[${i}]`;
-        const found = findTbljsonClass(child, depth + 1, childPath);
-        if (found) {
-         // log(`${logPrefix} NodeID#${nodeId}: ${indent}Returning found result from child: ${found}`);
-          return found;
-      }
-    }
-    } else {
-     // log(`${logPrefix} NodeID#${nodeId}: ${indent}Element has no children`);
-    }
-
-   // log(`${logPrefix} NodeID#${nodeId}: ${indent}No tbljson class found in this element or its children`);
-    return null;
   }
 
- // log(`${logPrefix} NodeID#${nodeId}: Starting recursive search for tbljson class...`);
-  encodedJsonString = findTbljsonClass(node, 0, 'ROOT');
-
-  if (encodedJsonString) {
-   // log(`${logPrefix} NodeID#${nodeId}: *** SUCCESS: Found encoded tbljson class: ${encodedJsonString} ***`);
-  } else {
-   // log(`${logPrefix} NodeID#${nodeId}: *** NO TBLJSON CLASS FOUND ***`);
-  } 
-
-  if (!encodedJsonString) {
+  if (!metadataInfo) {
      // log(`${logPrefix} NodeID#${nodeId}: No tbljson-* class found. Assuming not a table line. END.`);
 
      // log(`${logPrefix} NodeID#${nodeId}: DEBUG - Node tag: ${node.tagName}, Node classes:`, Array.from(node.classList || []));
@@ -806,8 +799,9 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
         }
       }
 
-      return cb(); 
+      return cb();
   }
+
 
   const existingTable = node.querySelector('table.dataTable[data-tblId]');
   if (existingTable) {
@@ -816,25 +810,16 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   }
 
  // log(`${logPrefix} NodeID#${nodeId}: Decoding and parsing metadata...`);
-  try {
-    const decoded = dec(encodedJsonString);
-     // log(`${logPrefix} NodeID#${nodeId}: Decoded string: ${decoded}`);
-      if (!decoded) throw new Error('Decoded string is null or empty.');
-    rowMetadata = JSON.parse(decoded);
-     // log(`${logPrefix} NodeID#${nodeId}: Parsed rowMetadata:`, rowMetadata);
-
-      if (!rowMetadata || typeof rowMetadata.tblId === 'undefined' || typeof rowMetadata.row === 'undefined' || typeof rowMetadata.cols !== 'number') {
-          throw new Error('Invalid or incomplete metadata (missing tblId, row, or cols).');
-      }
-     // log(`${logPrefix} NodeID#${nodeId}: Metadata validated successfully.`);
-
-  } catch(e) { 
-     // log(`${logPrefix} NodeID#${nodeId}: FATAL ERROR - Failed to decode/parse/validate tbljson metadata. Rendering cannot proceed.`, e);
-      console.error(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Failed to decode/parse/validate tbljson.`, encodedJsonString, e);
+  if (!metadataInfo.isWellFormed || !metadataInfo.metadata) {
+     // log(`${logPrefix} NodeID#${nodeId}: Metadata missing required fields.`);
+      const errorDetails = metadataInfo.error || metadataInfo.metadata;
+      console.error(`[ep_data_tables] ${funcName} NodeID#${nodeId}: Failed to decode/parse/validate tbljson.`, errorDetails);
       node.innerHTML = '<div style="color:red; border: 1px solid red; padding: 5px;">[ep_data_tables] Error: Invalid table metadata attribute found.</div>';
      // log(`${logPrefix} NodeID#${nodeId}: Rendered error message in node. END.`);
     return cb();
   }
+
+  rowMetadata = metadataInfo.metadata;
 
   const delimitedTextFromLine = node.innerHTML;
  // log(`${logPrefix} NodeID#${nodeId}: Using node.innerHTML for delimited text to preserve styling.`);
