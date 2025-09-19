@@ -1,4 +1,15 @@
 const ATTR_TABLE_JSON = 'tbljson';
+// Global guard: Chrome/macOS sometimes loads the same plugin script twice due to a
+// subtle preload/import timing quirk, causing duplicate aceInitialized hooks that
+// explode into large duplicate-row changesets.  Bail early on re-entry.
+if (typeof window !== 'undefined') {
+  if (window.__epDataTablesLoaded) {
+    console.debug('[ep_data_tables] Duplicate client_hooks.js load suppressed');
+    // eslint-disable-next-line no-useless-return
+    return; // Abort evaluation of the rest of the module
+  }
+  window.__epDataTablesLoaded = true;
+}
 const ATTR_CELL       = 'td';
 const ATTR_CLASS_PREFIX = 'tbljson-';
 const log             = (...m) => console.debug('[ep_data_tables:client_hooks]', ...m);
@@ -623,7 +634,8 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   const cellsHtml = innerHTMLSegments.map((segment, index) => {
     const textOnly = (segment || '').replace(/<[^>]*>/g, '').replace(/&nbsp;/ig, ' ').trim();
     let modifiedSegment = segment || '';
-    const isEmpty = !segment || textOnly === '';
+    const containsImage = /\bimage-placeholder\b/.test(modifiedSegment);
+    const isEmpty = (!segment || textOnly === '') && !containsImage;
     if (isEmpty) {
       const cellClass = encodedTbljsonClass ? `${encodedTbljsonClass} tblCell-${index}` : `tblCell-${index}`;
       modifiedSegment = `<span class="${cellClass}">&nbsp;</span>`;
@@ -862,8 +874,8 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     .replace(/<span class="ep-data_tables-caret-anchor"[^>]*><\/span>/ig, '')
     .replace(/\r?\n/g, ' ')
     .replace(/<br\s*\/?>/gi, ' ')
-    .replace(/\u00A0/gu, ' ')
-    .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
+  //   .replace(/\u00A0/gu, ' ')
+  //  .replace(/[\u200B\u200C\u200D\uFEFF]/g, '')
     .replace(/\s+/g, ' ');
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
 
@@ -1937,6 +1949,15 @@ exports.aceInitialized = (h, ctx) => {
           if (!e || e._epDataTablesNormalized) return;
           const t = e.inputType || '';
           const dataStr = typeof e.data === 'string' ? e.data : '';
+
+          // If this NBSP is flanked by ZWSPs we are inside an image placeholder.
+          // In that case leave it untouched so caret math stays correct.
+          if (dataStr === '\u00A0' && rep && rep.selStart) {
+            const lineText = rep.lines.atIndex(rep.selStart[0])?.text || '';
+            const pos = rep.selStart[1]; // caret is before the NBSP
+            if (lineText.slice(pos - 1, pos + 2) === '\u200B\u00A0\u200B') return;
+          }
+
           const hasSoftWs = /[\r\n\u00A0]/.test(dataStr); // include NBSP (U+00A0)
           const isSoftBreak = t === 'insertParagraph' || t === 'insertLineBreak' || hasSoftWs;
           if (!isSoftBreak) return;
@@ -4890,3 +4911,4 @@ exports.aceUndoRedo = (hook, ctx) => {
    // log(`${logPrefix} Error details:`, { message: e.message, stack: e.stack });
   }
 };
+
