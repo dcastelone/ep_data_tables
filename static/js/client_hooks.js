@@ -611,7 +611,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   if (!metadata || typeof metadata.tblId === 'undefined' || typeof metadata.row === 'undefined') {
     console.error(`[ep_data_tables] ${funcName}: Invalid or missing metadata. Aborting.`);
    // log(`${funcName}: END - Error`);
-    return '<table class="dataTable dataTable-error"><tbody><tr><td>Error: Missing table metadata</td></tr></tbody></table>';
+    return '<table class="dataTable dataTable-error" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false"><tbody><tr><td>Error: Missing table metadata</td></tr></tbody></table>';
   }
 
   const numCols = innerHTMLSegments.length;
@@ -691,7 +691,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     const resizeHandle = !isLastColumn ? 
       `<div class="ep-data_tables-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
 
-    const tdContent = `<td style="${cellStyle}" data-column="${index}" draggable="false">${modifiedSegment}${resizeHandle}</td>`;
+    const tdContent = `<td style="${cellStyle}" data-column="${index}" draggable="false" autocorrect="off" autocapitalize="off" spellcheck="false">${modifiedSegment}${resizeHandle}</td>`;
     return tdContent;
   }).join('');
  // log(`${funcName}: Joined all cellsHtml:`, cellsHtml);
@@ -699,7 +699,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
  // log(`${funcName}: First row class applied: '${firstRowClass}'`);
 
-  const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
+  const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
  // log(`${funcName}: Generated final table HTML:`, tableHtml);
  // log(`${funcName}: END - Success`);
   return tableHtml;
@@ -1704,33 +1704,53 @@ exports.aceInitialized = (h, ctx) => {
     ed.ep_data_tables_editor = editor;
    // log(`${logPrefix}: Stored editor reference as ed.ep_data_tables_editor.`);
 
-    let $inner;
-    try {
-     // log(`${callWithAceLogPrefix} Attempting to find inner iframe body for listener attachment.`);
+    // Retry logic for iframe access to handle timing/race conditions
+    const tryGetIframeBody = (attempt = 0) => {
+      if (attempt > 0) {
+        console.log(`${callWithAceLogPrefix} Retry attempt ${attempt}/5 to access iframe body`);
+      }
+      
       const $iframeOuter = $('iframe[name="ace_outer"]');
       if ($iframeOuter.length === 0) {
-        console.error(`${callWithAceLogPrefix} ERROR: Could not find outer iframe (ace_outer).`);
-       // log(`${callWithAceLogPrefix} Failed to find ace_outer.`);
+        if (attempt < 5) {
+          setTimeout(() => tryGetIframeBody(attempt + 1), 100);
+          return;
+        }
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find outer iframe (ace_outer) after ${attempt} attempts.`);
         return;
       }
-     // log(`${callWithAceLogPrefix} Found ace_outer:`, $iframeOuter);
 
       const $iframeInner = $iframeOuter.contents().find('iframe[name="ace_inner"]');
       if ($iframeInner.length === 0) {
-        console.error(`${callWithAceLogPrefix} ERROR: Could not find inner iframe (ace_inner).`);
-       // log(`${callWithAceLogPrefix} Failed to find ace_inner within ace_outer.`);
+        if (attempt < 5) {
+          setTimeout(() => tryGetIframeBody(attempt + 1), 100);
+          return;
+        }
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find inner iframe (ace_inner) after ${attempt} attempts.`);
         return;
       }
-     // log(`${callWithAceLogPrefix} Found ace_inner:`, $iframeInner);
 
       const innerDocBody = $iframeInner.contents().find('body');
       if (innerDocBody.length === 0) {
-        console.error(`${callWithAceLogPrefix} ERROR: Could not find body element in inner iframe.`);
-       // log(`${callWithAceLogPrefix} Failed to find body in ace_inner.`);
+        if (attempt < 5) {
+          setTimeout(() => tryGetIframeBody(attempt + 1), 100);
+          return;
+        }
+        console.error(`${callWithAceLogPrefix} ERROR: Could not find body element in inner iframe after ${attempt} attempts.`);
         return;
       }
-      $inner = $(innerDocBody[0]);
-     // log(`${callWithAceLogPrefix} Successfully found inner iframe body:`, $inner);
+
+      const $inner = $(innerDocBody[0]);
+      if (attempt > 0) {
+        console.log(`${callWithAceLogPrefix} Successfully found iframe body on attempt ${attempt + 1}`);
+      }
+     
+      // SUCCESS - Now attach all listeners and set attributes
+      attachListeners($inner, $iframeOuter, $iframeInner, innerDocBody);
+    };
+
+    const attachListeners = ($inner, $iframeOuter, $iframeInner, innerDocBody) => {
+      try {
 
       const mobileSuggestionBlocker = (evt) => {
         const t = evt && evt.inputType || '';
@@ -1911,37 +1931,38 @@ exports.aceInitialized = (h, ctx) => {
       };
 
       // IME/autocorrect diagnostics: capture-phase logging and newline soft-normalization for table lines
-      const logIMEEvent = (rawEvt, tag) => {
-        try {
-          const e = rawEvt && (rawEvt.originalEvent || rawEvt);
-          const rep = ed.ace_getRep && ed.ace_getRep();
-          const selStart = rep && rep.selStart;
-          const lineNum = selStart ? selStart[0] : -1;
-          let isTableLine = false;
-          if (lineNum >= 0) {
-            let s = docManager && docManager.getAttributeOnLine ? docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON) : null;
-            if (!s) {
-              const meta = getTableLineMetadata(lineNum, ed, docManager);
-              isTableLine = !!meta && typeof meta.cols === 'number';
-            } else {
-              isTableLine = true;
-            }
-          }
-          if (!isTableLine) return;
-          const payload = {
-            tag,
-            type: e && e.type,
-            inputType: e && e.inputType,
-            data: typeof (e && e.data) === 'string' ? e.data : null,
-            isComposing: !!(e && e.isComposing),
-            key: e && e.key,
-            code: e && e.code,
-            which: e && e.which,
-            keyCode: e && e.keyCode,
-          };
-          console.debug('[ep_data_tables:ime-diag]', payload);
-        } catch (_) {}
-      };
+      // COMMENTED OUT FOR PRODUCTION - Uncomment for debugging IME/composition issues
+      // const logIMEEvent = (rawEvt, tag) => {
+      //   try {
+      //     const e = rawEvt && (rawEvt.originalEvent || rawEvt);
+      //     const rep = ed.ace_getRep && ed.ace_getRep();
+      //     const selStart = rep && rep.selStart;
+      //     const lineNum = selStart ? selStart[0] : -1;
+      //     let isTableLine = false;
+      //     if (lineNum >= 0) {
+      //       let s = docManager && docManager.getAttributeOnLine ? docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON) : null;
+      //       if (!s) {
+      //         const meta = getTableLineMetadata(lineNum, ed, docManager);
+      //         isTableLine = !!meta && typeof meta.cols === 'number';
+      //       } else {
+      //         isTableLine = true;
+      //       }
+      //     }
+      //     if (!isTableLine) return;
+      //     const payload = {
+      //       tag,
+      //       type: e && e.type,
+      //       inputType: e && e.inputType,
+      //       data: typeof (e && e.data) === 'string' ? e.data : null,
+      //       isComposing: !!(e && e.isComposing),
+      //       key: e && e.key,
+      //       code: e && e.code,
+      //       which: e && e.which,
+      //       keyCode: e && e.keyCode,
+      //     };
+      //     console.debug('[ep_data_tables:ime-diag]', payload);
+      //   } catch (_) {}
+      // };
 
       const softBreakNormalizer = (rawEvt) => {
         try {
@@ -1991,9 +2012,10 @@ exports.aceInitialized = (h, ctx) => {
 
       if ($inner && $inner.length > 0 && $inner[0].addEventListener) {
         const el = $inner[0];
-        ['beforeinput','input','textInput','compositionstart','compositionupdate','compositionend','keydown','keyup'].forEach((t) => {
-          el.addEventListener(t, (ev) => logIMEEvent(ev, 'capture'), true);
-        });
+        // COMMENTED OUT FOR PRODUCTION - Uncomment for debugging IME/composition issues
+        // ['beforeinput','input','textInput','compositionstart','compositionupdate','compositionend','keydown','keyup'].forEach((t) => {
+        //   el.addEventListener(t, (ev) => logIMEEvent(ev, 'capture'), true);
+        // });
         el.addEventListener('beforeinput', softBreakNormalizer, true);
       }
 
@@ -2026,17 +2048,11 @@ exports.aceInitialized = (h, ctx) => {
         };
         disableAuto(innerDocBody[0] || innerDocBody);
       } catch (_) {}
-    } catch (e) {
-      console.error(`${callWithAceLogPrefix} ERROR: Exception while trying to find inner iframe body:`, e);
-     // log(`${callWithAceLogPrefix} Exception details:`, { message: e.message, stack: e.stack });
-      return;
-    }
-
-    if (!$inner || $inner.length === 0) {
-      console.error(`${callWithAceLogPrefix} ERROR: $inner is not valid after attempting to find iframe body. Cannot attach listeners.`);
-     // log(`${callWithAceLogPrefix} $inner is invalid. Aborting.`);
-      return;
-    }
+      
+      if (!$inner || $inner.length === 0) {
+        console.error(`${callWithAceLogPrefix} ERROR: $inner is not valid. Cannot attach listeners.`);
+        return;
+      }
 
    // log(`${callWithAceLogPrefix} Attaching cut event listener to $inner (inner iframe body).`);
     $inner.on('cut', (evt) => {
@@ -3639,6 +3655,13 @@ exports.aceInitialized = (h, ctx) => {
     setupGlobalHandlers();
 
    // log(`${callWithAceLogPrefix} Column resize listeners attached successfully.`);
+      } catch (e) {
+        console.error(`${callWithAceLogPrefix} ERROR: Exception while attaching listeners:`, e);
+      }
+    }; // End of attachListeners function
+
+    // Start the retry process to access iframes and attach all listeners
+    tryGetIframeBody(0);
 
   }, 'tablePasteAndResizeListeners', true);
  // log(`${logPrefix} ace_callWithAce for listeners setup completed.`);
