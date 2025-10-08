@@ -2045,6 +2045,8 @@ exports.aceInitialized = (h, ctx) => {
           el.setAttribute('autocomplete', 'off');
           el.setAttribute('autocapitalize', 'off');
           el.setAttribute('spellcheck', 'false');
+          el.setAttribute('data-gramm', 'false');
+          el.setAttribute('data-enable-grammarly', 'false');
         };
         disableAuto(innerDocBody[0] || innerDocBody);
       } catch (_) {}
