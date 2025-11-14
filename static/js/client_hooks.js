@@ -2014,6 +2014,15 @@ exports.aceInitialized = (h, ctx) => {
         const safeSan = (s) => sanitizeCellContent(s || '');
         const run = (aceInstance) => {
           try {
+            // Validate metadata and indices
+            if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+              logCompositionEvent(`${logTag}-invalid-meta`, evt, { lineNum, meta: tableMetadata });
+              return;
+            }
+            if (typeof cellIndex !== 'number' || cellIndex < 0 || cellIndex >= tableMetadata.cols) {
+              logCompositionEvent(`${logTag}-invalid-cell-index`, evt, { lineNum, cellIndex });
+              return;
+            }
             const repBefore = aceInstance.ace_getRep();
             const lineEntryBefore = repBefore.lines.atIndex(lineNum);
             if (!lineEntryBefore) {
@@ -2030,37 +2039,114 @@ exports.aceInitialized = (h, ctx) => {
             }
             const cellText = cells[cellIndex] || '';
             const cellLen = cellText.length;
+            const cellAbsStart = baseOffset;
+            const cellAbsEnd = baseOffset + cellLen;
             const sAbs = baseOffset + Math.max(0, Math.min(relStart, cellLen));
             const eAbs = baseOffset + Math.max(0, Math.min(relEnd, cellLen));
-            const sFinal = Math.max(0, Math.min(lineLen, Math.min(sAbs, eAbs)));
-            const eFinal = Math.max(0, Math.min(lineLen, Math.max(sAbs, eAbs)));
+            // Strictly clamp to the cell boundaries so we never touch delimiters or adjacent structures
+            const sFinal = Math.max(cellAbsStart, Math.min(cellAbsEnd, Math.min(sAbs, eAbs)));
+            const eFinal = Math.max(cellAbsStart, Math.min(cellAbsEnd, Math.max(sAbs, eAbs)));
             const toInsert = safeSan(insertText);
+
+            if (eFinal < sFinal) {
+              logCompositionEvent(`${logTag}-invalid-range`, evt, { sFinal, eFinal });
+              return;
+            }
+            if (!toInsert && sFinal === eFinal) {
+              // No-op edit
+              return;
+            }
 
             logCompositionEvent(`${logTag}-apply-start`, evt, {
               lineNum, cellIndex, relStart, relEnd, start: sFinal, end: eFinal, insertLen: toInsert.length,
             });
 
-            aceInstance.ace_performDocumentReplaceRange([lineNum, sFinal], [lineNum, eFinal], toInsert);
+            try {
+              aceInstance.ace_performDocumentReplaceRange([lineNum, sFinal], [lineNum, eFinal], toInsert);
+            } catch (replaceErr) {
+              logCompositionEvent(`${logTag}-replace-error`, evt, { error: replaceErr?.stack || replaceErr });
+              return;
+            }
 
             const repAfter = aceInstance.ace_getRep();
             const insertedEnd = sFinal + toInsert.length;
             if (toInsert.length > 0) {
-              aceInstance.ace_performDocumentApplyAttributesToRange(
-                [lineNum, sFinal],
-                [lineNum, insertedEnd],
-                [[ATTR_CELL, String(cellIndex)]],
-              );
+              try {
+                aceInstance.ace_performDocumentApplyAttributesToRange(
+                  [lineNum, sFinal],
+                  [lineNum, insertedEnd],
+                  [[ATTR_CELL, String(cellIndex)]],
+                );
+              } catch (attrErr) {
+                logCompositionEvent(`${logTag}-attr-error`, evt, { error: attrErr?.stack || attrErr });
+              }
             }
 
-            ed.ep_data_tables_applyMeta(
-              lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, repAfter, ed, null, docManager,
-            );
+            try {
+              ed.ep_data_tables_applyMeta(
+                lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, repAfter, ed, null, docManager,
+              );
+            } catch (metaErr) {
+              logCompositionEvent(`${logTag}-meta-error`, evt, { error: metaErr?.stack || metaErr });
+            }
 
-            aceInstance.ace_performSelectionChange([lineNum, insertedEnd], [lineNum, insertedEnd], false);
+            // Verify delimiter integrity; if mismatch, rebuild canonical line very cautiously
+            try {
+              const lineEntryAfter = repAfter.lines.atIndex(lineNum);
+              const rebuilt = (lineEntryAfter?.text || '').split(DELIMITER);
+              if (rebuilt.length !== tableMetadata.cols) {
+                const sanitizedCells = new Array(tableMetadata.cols).fill(' ');
+                for (let i = 0; i < Math.min(rebuilt.length, tableMetadata.cols); i++) {
+                  sanitizedCells[i] = safeSan(rebuilt[i] || ' ');
+                }
+                const canonicalLine = sanitizedCells.join(DELIMITER);
+                const existingLength2 = (lineEntryAfter?.text || '').length;
+                try {
+                  aceInstance.ace_performDocumentReplaceRange([lineNum, 0], [lineNum, existingLength2], canonicalLine);
+                } catch (repl2Err) {
+                  logCompositionEvent(`${logTag}-fallback-replace-error`, evt, { error: repl2Err?.stack || repl2Err });
+                  return;
+                }
+                // Re-apply per-cell attributes only for non-empty spans
+                let off = 0;
+                for (let i = 0; i < sanitizedCells.length; i++) {
+                  const t = sanitizedCells[i] || '';
+                  if (t.length > 0) {
+                    try {
+                      aceInstance.ace_performDocumentApplyAttributesToRange(
+                        [lineNum, off],
+                        [lineNum, off + t.length],
+                        [[ATTR_CELL, String(i)]],
+                      );
+                    } catch (attr2Err) {
+                      logCompositionEvent(`${logTag}-fallback-attr-error`, evt, { error: attr2Err?.stack || attr2Err });
+                    }
+                  }
+                  off += t.length;
+                  if (i < sanitizedCells.length - 1) off += DELIMITER.length;
+                }
+                try {
+                  const repFix = aceInstance.ace_getRep();
+                  ed.ep_data_tables_applyMeta(lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, repFix, ed, null, docManager);
+                } catch (meta2Err) {
+                  logCompositionEvent(`${logTag}-fallback-meta-error`, evt, { error: meta2Err?.stack || meta2Err });
+                }
+              }
+            } catch (rebuildErr) {
+              logCompositionEvent(`${logTag}-rebuild-error`, evt, { error: rebuildErr?.stack || rebuildErr });
+            }
+
+            try {
+              aceInstance.ace_performSelectionChange([lineNum, insertedEnd], [lineNum, insertedEnd], false);
+            } catch (selErr) {
+              logCompositionEvent(`${logTag}-selection-error`, evt, { error: selErr?.stack || selErr });
+            }
             logCompositionEvent(`${logTag}`, evt, {
               lineNum, cellIndex, start: sFinal, end: insertedEnd,
             });
-            try { aceInstance.ace_fastIncorp(5); } catch (_) {}
+            try { aceInstance.ace_fastIncorp(5); } catch (incErr) {
+              logCompositionEvent(`${logTag}-fastincorp-error`, evt, { error: incErr?.stack || incErr });
+            }
           } catch (err) {
             logCompositionEvent(`${logTag}-error`, evt, { error: err?.stack || err });
           }
