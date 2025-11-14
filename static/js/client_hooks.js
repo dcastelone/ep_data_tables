@@ -1777,6 +1777,7 @@ exports.aceInitialized = (h, ctx) => {
       };
 
       let suppressNextInputCommit = false;
+      let desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
 
       const getTableMetadataForLine = (lineNum) => {
         let lineAttrString = docManager && docManager.getAttributeOnLine
@@ -1981,7 +1982,7 @@ exports.aceInitialized = (h, ctx) => {
               additionalContext: 'preErrorState',
               lineNum,
               sanitizedCells,
-              beforeDOM: lineEntry?.lineNode?.outerHTML,
+              beforeDOM: lineEntryBefore?.lineNode?.outerHTML,
             });
             try {
               logCompositionEvent(`${logTag}-ace-error-operations`, evt, {
@@ -1996,6 +1997,79 @@ exports.aceInitialized = (h, ctx) => {
         }, `${logTag}-ace`);
 
         if (suppressInputCommit) suppressNextInputCommit = true;
+      };
+
+      // Minimal in-cell replacement that preserves attributes outside the edited span.
+      const applyCellEditMinimal = ({
+        lineNum,
+        tableMetadata,
+        cellIndex,
+        relStart,
+        relEnd,
+        insertText,
+        evt,
+        logTag = 'cell-edit-minimal',
+        aceInstance: providedAceInstance = null,
+      }) => {
+        const safeSan = (s) => sanitizeCellContent(s || '');
+        const run = (aceInstance) => {
+          try {
+            const repBefore = aceInstance.ace_getRep();
+            const lineEntryBefore = repBefore.lines.atIndex(lineNum);
+            if (!lineEntryBefore) {
+              logCompositionEvent(`${logTag}-missing-line`, evt, { lineNum });
+              return;
+            }
+            const currentText = lineEntryBefore.text || '';
+            const lineLen = currentText.length;
+            const cells = currentText.split(DELIMITER);
+            // Compute base offset up to the target cell
+            let baseOffset = 0;
+            for (let i = 0; i < cellIndex; i++) {
+              baseOffset += (cells[i]?.length ?? 0) + DELIMITER.length;
+            }
+            const cellText = cells[cellIndex] || '';
+            const cellLen = cellText.length;
+            const sAbs = baseOffset + Math.max(0, Math.min(relStart, cellLen));
+            const eAbs = baseOffset + Math.max(0, Math.min(relEnd, cellLen));
+            const sFinal = Math.max(0, Math.min(lineLen, Math.min(sAbs, eAbs)));
+            const eFinal = Math.max(0, Math.min(lineLen, Math.max(sAbs, eAbs)));
+            const toInsert = safeSan(insertText);
+
+            logCompositionEvent(`${logTag}-apply-start`, evt, {
+              lineNum, cellIndex, relStart, relEnd, start: sFinal, end: eFinal, insertLen: toInsert.length,
+            });
+
+            aceInstance.ace_performDocumentReplaceRange([lineNum, sFinal], [lineNum, eFinal], toInsert);
+
+            const repAfter = aceInstance.ace_getRep();
+            const insertedEnd = sFinal + toInsert.length;
+            if (toInsert.length > 0) {
+              aceInstance.ace_performDocumentApplyAttributesToRange(
+                [lineNum, sFinal],
+                [lineNum, insertedEnd],
+                [[ATTR_CELL, String(cellIndex)]],
+              );
+            }
+
+            ed.ep_data_tables_applyMeta(
+              lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, repAfter, ed, null, docManager,
+            );
+
+            aceInstance.ace_performSelectionChange([lineNum, insertedEnd], [lineNum, insertedEnd], false);
+            logCompositionEvent(`${logTag}`, evt, {
+              lineNum, cellIndex, start: sFinal, end: insertedEnd,
+            });
+            try { aceInstance.ace_fastIncorp(5); } catch (_) {}
+          } catch (err) {
+            logCompositionEvent(`${logTag}-error`, evt, { error: err?.stack || err });
+          }
+        };
+        if (providedAceInstance) {
+          run(providedAceInstance);
+        } else {
+          ed.ace_callWithAce((ace) => run(ace), `${logTag}-ace`);
+        }
       };
 
       const handleDesktopCommitInput = (evt) => {
@@ -2105,10 +2179,43 @@ exports.aceInitialized = (h, ctx) => {
 
       $inner.on('compositionstart', (evt) => {
         logCompositionEvent('compositionstart', evt);
+        if (isAndroidUA() || isIOSUA()) return;
+        try {
+          const rep0 = ed.ace_getRep && ed.ace_getRep();
+          if (rep0 && rep0.selStart) {
+            const lineNum = rep0.selStart[0];
+            let cellIndex = -1;
+            try {
+              const tableMetadata = getTableMetadataForLine(lineNum);
+              if (tableMetadata && typeof tableMetadata.cols === 'number') {
+                const entry = rep0.lines.atIndex(lineNum);
+                const cells = (entry?.text || '').split(DELIMITER);
+                const sanitized = cells.map((c) => sanitizeCellContent(c || ''));
+                cellIndex = computeTargetCellIndexFromSelection(rep0.selStart[1], sanitized);
+              }
+            } catch (_) {}
+            desktopComposition = {
+              active: true,
+              start: rep0.selStart.slice(),
+              end: rep0.selEnd ? rep0.selEnd.slice() : rep0.selStart.slice(),
+              lineNum,
+              cellIndex,
+            };
+          }
+        } catch (_) {
+          desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
+        }
       });
 
       $inner.on('compositionupdate', (evt) => {
         logCompositionEvent('compositionupdate', evt);
+        if (isAndroidUA() || isIOSUA()) return;
+        try {
+          if (desktopComposition.active) {
+            const repN = ed.ace_getRep && ed.ace_getRep();
+            if (repN && repN.selEnd) desktopComposition.end = repN.selEnd.slice();
+          }
+        } catch (_) {}
       });
 
       $inner.on('input', (evt) => {
@@ -2391,6 +2498,35 @@ exports.aceInitialized = (h, ctx) => {
         } catch (_) {}
       };
 
+      const desktopCompositionSuppressor = (rawEvt) => {
+        try {
+          const e = rawEvt && (rawEvt.originalEvent || rawEvt);
+          if (!e || isAndroidUA() || isIOSUA()) return;
+          if (!desktopComposition.active) return;
+          const t = e.inputType || '';
+          if (e.isComposing && typeof t === 'string' && t.startsWith('insert')) {
+            try { e.preventDefault(); } catch (_) {}
+            try { if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation(); } catch (_) {}
+            try { if (typeof e.stopPropagation === 'function') e.stopPropagation(); } catch (_) {}
+            e._epDataTablesHandled = true;
+          }
+        } catch (_) {}
+      };
+
+      const desktopCompositionInputSuppressor = (rawEvt) => {
+        try {
+          const e = rawEvt && (rawEvt.originalEvent || rawEvt);
+          if (!e || isAndroidUA() || isIOSUA()) return;
+          if (!desktopComposition.active) return;
+          const t = e.inputType || '';
+          if (e.isComposing && typeof t === 'string' && t.startsWith('insert')) {
+            try { if (typeof e.stopImmediatePropagation === 'function') e.stopImmediatePropagation(); } catch (_) {}
+            try { if (typeof e.stopPropagation === 'function') e.stopPropagation(); } catch (_) {}
+            e._epDataTablesHandled = true;
+          }
+        } catch (_) {}
+      };
+
       if ($inner && $inner.length > 0 && $inner[0].addEventListener) {
         const el = $inner[0];
         // COMMENTED OUT FOR PRODUCTION - Uncomment for debugging IME/composition issues
@@ -2398,6 +2534,9 @@ exports.aceInitialized = (h, ctx) => {
         //   el.addEventListener(t, (ev) => logIMEEvent(ev, 'capture'), true);
         // });
         el.addEventListener('beforeinput', softBreakNormalizer, true);
+        el.addEventListener('beforeinput', desktopCompositionSuppressor, true);
+        el.addEventListener('input', desktopCompositionInputSuppressor, true);
+        el.addEventListener('textInput', desktopCompositionInputSuppressor, true);
       }
 
       if ($inner && $inner.length > 0 && $inner[0].addEventListener) {
@@ -3537,95 +3676,80 @@ exports.aceInitialized = (h, ctx) => {
       const dataPreview = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
       logCompositionEvent('compositionend-desktop-fired', evt, { data: dataPreview });
 
-      // Ensure we run strictly after the browser's final input event has been processed
-      suppressNextInputCommit = true;
+        // Prevent the immediate post-composition input commit from running; we pipeline instead
+        suppressNextInputCommit = true;
       requestAnimationFrame(() => {
         try {
           ed.ace_callWithAce((aceInstance) => {
-            const repAfter = aceInstance.ace_getRep();
-            const selStart = repAfter && repAfter.selStart;
-            if (!selStart) return;
-            const lineNum = selStart[0];
-            let attrString = docManager && docManager.getAttributeOnLine
-              ? docManager.getAttributeOnLine(lineNum, ATTR_TABLE_JSON)
-              : null;
-            let metadata = null;
-            if (attrString) { try { metadata = JSON.parse(attrString); } catch (_) {} }
-            if (!metadata) metadata = getTableLineMetadata(lineNum, ed, docManager);
-            if (!metadata || typeof metadata.cols !== 'number' || typeof metadata.tblId === 'undefined') {
-              logCompositionEvent('compositionend-desktop-no-meta', evt, { lineNum });
+            // Pipeline: Apply committed IME string synchronously to the target cell
+            const commitStrRaw = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
+            const commitStr = sanitizeCellContent(commitStrRaw || '');
+            const repNow = aceInstance.ace_getRep();
+            const caret = repNow && repNow.selStart;
+            if (!caret) return;
+              const pipelineLineNum = caret[0];
+            let metadata = getTableMetadataForLine(pipelineLineNum);
+            const entry = repNow.lines.atIndex(pipelineLineNum);
+            if (!entry) {
+              logCompositionEvent('compositionend-desktop-no-line-entry', evt, { lineNum: pipelineLineNum });
               return;
             }
-            const attrSource = attrString || JSON.stringify(metadata);
-            logCompositionEvent('compositionend-desktop-revalidate', evt, {
-              lineNum,
-              tblId: metadata.tblId,
-              row: metadata.row,
-              cols: metadata.cols,
-            });
-            ed.ep_data_tables_applyMeta(
-              lineNum,
-              metadata.tblId,
-              metadata.row,
-              metadata.cols,
-              repAfter,
-              ed,
-              attrSource,
-              docManager
-            );
+            // Fallback: derive metadata from DOM if missing (first-row/empty-cell cases)
+            if (!metadata || typeof metadata.cols !== 'number') {
+              try {
+                const tableNode = entry.lineNode &&
+                  entry.lineNode.querySelector &&
+                  entry.lineNode.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]');
+                if (tableNode) {
+                  const domTblId = tableNode.getAttribute('data-tblId') || tableNode.getAttribute('data-tblid');
+                  const domRowAttr = tableNode.getAttribute('data-row');
+                  const tr = tableNode.querySelector('tbody > tr');
+                  const domCols = tr ? tr.children.length : 0;
+                  if (domTblId && domCols > 0) {
+                    metadata = {
+                      tblId: domTblId,
+                      row: domRowAttr ? parseInt(domRowAttr, 10) : 0,
+                      cols: domCols,
+                    };
+                    logCompositionEvent('compositionend-desktop-dom-meta', evt, {
+                      lineNum: pipelineLineNum, tblId: metadata.tblId, cols: metadata.cols,
+                    });
+                  }
+                }
+              } catch (_) {}
+            }
+            if (!metadata || typeof metadata.cols !== 'number') {
+              logCompositionEvent('compositionend-desktop-no-meta', evt, { lineNum: pipelineLineNum });
+              return;
+            }
+            const cellsNow = (entry.text || '').split(DELIMITER);
+            while (cellsNow.length < metadata.cols) cellsNow.push(' ');
+            const sanitizedNow = cellsNow.map((c) => sanitizeCellContent(c || ''));
+            let idx = (desktopComposition && desktopComposition.cellIndex >= 0)
+              ? desktopComposition.cellIndex
+              : computeTargetCellIndexFromSelection((desktopComposition && desktopComposition.start) ? desktopComposition.start[1] : caret[1], sanitizedNow);
+            if (idx < 0) idx = Math.min(metadata.cols - 1, 0);
 
-            const repPostMeta = aceInstance.ace_getRep();
-            const selAfterMeta = repPostMeta && repPostMeta.selStart;
-            if (!selAfterMeta) {
-              logCompositionEvent('compositionend-desktop-no-selection-post-meta', evt, { lineNum });
-              return;
-            }
-            const lineEntryAfter = repPostMeta.lines.atIndex(lineNum);
-            if (!lineEntryAfter) {
-              logCompositionEvent('compositionend-desktop-no-line-entry', evt, { lineNum });
-              return;
-            }
-            const sanitizedCells = collectSanitizedCells(lineEntryAfter, metadata, 'compositionend');
-            let targetCellIndex = computeTargetCellIndexFromSelection(selAfterMeta[1], sanitizedCells);
-            if (targetCellIndex === -1) {
-              const editor = ed.ep_data_tables_editor;
-              const lastClick = editor?.ep_data_tables_last_clicked;
-              if (lastClick && lastClick.tblId === metadata.tblId) {
-                targetCellIndex = lastClick.cellIndex;
-              }
-            }
-            if (targetCellIndex === -1) targetCellIndex = Math.min(metadata.cols - 1, 0);
+            // Compute relative selection in cell
+            let baseOffset = 0;
+            for (let i = 0; i < idx; i++) baseOffset += (sanitizedNow[i]?.length ?? 0) + DELIMITER.length;
+            const sColAbs = (desktopComposition && desktopComposition.start) ? desktopComposition.start[1] : caret[1];
+            const eColAbs = (desktopComposition && desktopComposition.end) ? desktopComposition.end[1] : sColAbs;
+            const sCol = Math.max(0, sColAbs - baseOffset);
+            const eCol = Math.max(sCol, Math.min(eColAbs - baseOffset, sanitizedNow[idx]?.length ?? 0));
 
-            const originalCellText = sanitizedCells[targetCellIndex] || '';
-            sanitizedCells[targetCellIndex] = sanitizeCellContent(originalCellText);
-            const canonicalLine = sanitizedCells.join(DELIMITER);
-            const currentLineText = lineEntryAfter.text || '';
-            logCompositionEvent('compositionend-desktop-compare', evt, {
-              lineNum,
-              targetCellIndex,
-              canonicalLine,
-              currentLineText,
-            });
-            if (canonicalLine === currentLineText) {
-              logCompositionEvent('compositionend-desktop-sanitize-skip', evt, {
-                lineNum,
-                targetCellIndex,
-                message: 'cell already clean',
+              applyCellEditMinimal({
+                    lineNum: pipelineLineNum,
+                    tableMetadata: metadata,
+                    cellIndex: idx,
+                    relStart: sCol,
+                    relEnd: eCol,
+                    insertText: commitStr,
+                    evt,
+                    logTag: 'compositionend-desktop-pipeline-minimal',
+                aceInstance,
               });
-              return;
-            }
-
-            const beforeDOM = lineEntryAfter?.lineNode?.outerHTML;
-            logCompositionEvent('compositionend-desktop-before-dom', evt, { lineNum, beforeDOM });
-            applyCanonicalCellsToLine({
-              lineNum,
-              sanitizedCells,
-              tableMetadata: metadata,
-              targetCellIndex,
-              evt,
-              logTag: 'compositionend-desktop-canonical',
-              suppressInputCommit: true,
-            });
+            desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
           }, 'tableDesktopCompositionEnd');
         } catch (compositionErr) {
           console.error(`${compLogPrefix} ERROR during desktop composition repair:`, compositionErr);
