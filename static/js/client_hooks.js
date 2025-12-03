@@ -1255,6 +1255,19 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
               } catch (metaErr) {
                 console.error('[ep_data_tables:postWriteCanonicalize] meta apply error', metaErr);
               }
+              
+              // CRITICAL: Skip orphan detection for fresh paste content
+              // If the PRIMARY line doesn't have a rendered table yet, this is fresh content
+              // that should be left to render normally, not aggressively merged.
+              // Orphan detection is only appropriate when there's an EXISTING table that got corrupted.
+              if (!lineHasTableDOM) {
+                console.debug('[ep_data_tables:postWriteCanonicalize] skipping orphan detection (no table on primary line - fresh paste)', {
+                  ln, capturedTblId, capturedRow,
+                });
+                // Skip to the end - let normal rendering proceed
+                return;
+              }
+              
               // Detect orphan lines: lines with same tblId/row attribute OR
               // lines with tbljson-* CSS classes but no table element (DOM-based orphan detection)
               // This preserves user data that was split into multiple lines due to composition/IME corruption
@@ -1318,23 +1331,60 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                           }
                         }
                         
-                        // Also check for tblCell-* spans (no encoded metadata, assume it's our target)
+                        // Also check for tblCell-* spans (no encoded metadata)
                         // This catches orphans where browser stripped tbljson-* but kept tblCell-*
+                        // CRITICAL: Only use this fallback if we can verify this line belongs to OUR table
+                        // Don't assume random tblCell-* spans belong to us - they could be fresh paste!
                         if (!seenOrphanLines.has(li)) {
                           const tblCellSpan = lineNode.querySelector('[class*="tblCell-"]');
                           if (tblCellSpan) {
-                            const orphanText = lineEntry?.text || '';
-                            // Only add if the text contains delimiters or meaningful content
-                            if (orphanText.includes(DELIMITER) || orphanText.trim().length > 0) {
-                              orphanLines.push({
-                                lineNum: li,
-                                text: orphanText,
-                                meta: { tblId: capturedTblId, row: capturedRow, cols: expectedCols },
-                                source: 'dom-class-tblCell',
-                              });
-                              seenOrphanLines.add(li);
-                              console.debug('[ep_data_tables:postWriteCanonicalize] detected tblCell DOM orphan', {
-                                lineNum: li, capturedTblId, capturedRow, textLen: orphanText.length,
+                            // SAFETY CHECK: Verify this line has OUR tbljson attribute, just row might differ
+                            // If it has tbljson for a DIFFERENT tblId, it's NOT our orphan
+                            let belongsToOurTable = false;
+                            try {
+                              const lineAttr = docManager.getAttributeOnLine(li, ATTR_TABLE_JSON);
+                              if (lineAttr) {
+                                const lineMeta = JSON.parse(lineAttr);
+                                if (lineMeta && lineMeta.tblId === capturedTblId) {
+                                  belongsToOurTable = true;
+                                }
+                              } else {
+                                // No tbljson attribute - check if there's a tbljson-* CLASS that we can decode
+                                const anyTbljsonSpan = lineNode.querySelector('[class*="tbljson-"]');
+                                if (anyTbljsonSpan) {
+                                  for (const cls of anyTbljsonSpan.classList) {
+                                    if (cls.startsWith('tbljson-')) {
+                                      try {
+                                        const decoded = JSON.parse(atob(cls.substring(8)));
+                                        if (decoded && decoded.tblId === capturedTblId) {
+                                          belongsToOurTable = true;
+                                        }
+                                      } catch (_) {}
+                                      break;
+                                    }
+                                  }
+                                }
+                              }
+                            } catch (_) {}
+                            
+                            if (belongsToOurTable) {
+                              const orphanText = lineEntry?.text || '';
+                              // Only add if the text contains delimiters or meaningful content
+                              if (orphanText.includes(DELIMITER) || orphanText.trim().length > 0) {
+                                orphanLines.push({
+                                  lineNum: li,
+                                  text: orphanText,
+                                  meta: { tblId: capturedTblId, row: capturedRow, cols: expectedCols },
+                                  source: 'dom-class-tblCell',
+                                });
+                                seenOrphanLines.add(li);
+                                console.debug('[ep_data_tables:postWriteCanonicalize] detected tblCell DOM orphan', {
+                                  lineNum: li, capturedTblId, capturedRow, textLen: orphanText.length,
+                                });
+                              }
+                            } else {
+                              console.debug('[ep_data_tables:postWriteCanonicalize] skipping tblCell line (different table)', {
+                                lineNum: li, capturedTblId,
                               });
                             }
                           }
@@ -1722,7 +1772,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     // Stop here; let the next render reflect the canonicalized text.
     // BUT: if column operation is in progress, continue to render the table with current segments
     if (!skipMismatchReturn) {
-      return cb();
+    return cb();
     }
     // Otherwise, fall through to table building below
   } else {
@@ -7452,12 +7502,33 @@ exports.collectContentLineText = (hookName, context) => {
       }
       
       if (foundOrphanTableSpan) {
-        // This is an ORPHAN table-related span - suppress its text to prevent line fragmentation
+        // Check if this line ALREADY has a rendered table
+        // If NOT, this is likely fresh paste content awaiting table construction - DON'T suppress
+        // Only suppress if there's an existing table and this span is outside it (true orphan)
+        try {
+          const lineDiv = parentEl.closest('div.ace-line');
+          if (lineDiv) {
+            const existingTable = lineDiv.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]');
+            if (!existingTable) {
+              // NO table on this line yet - this is fresh paste content, let it through
+              // The tbljson span will trigger acePostWriteDomLineHTML to build the table
+              console.debug('[ep_data_tables:collector] allowing fresh tbljson content (no table yet)', {
+                lineId: lineDiv.id || null,
+                detectedClass,
+                originalText: node.nodeValue?.slice(0, 50),
+              });
+              // DON'T suppress - let normal collection proceed to capture the tbljson content
+              return; // Exit without modifying context.text
+            }
+          }
+        } catch (_) {}
+        
+        // There IS a table on this line, but this span is outside it - THAT's a true orphan, suppress
         context.text = '';
         try {
           const lineDiv = parentEl.closest('div.ace-line');
           const classStr = parentEl.className ? String(parentEl.className) : '';
-          console.debug('[ep_data_tables:collector] SUPPRESSED orphan table span', {
+          console.debug('[ep_data_tables:collector] SUPPRESSED orphan table span (table exists)', {
             lineId: lineDiv?.id || null,
             parentClass: classStr.slice(0, 100),
             detectedClass,
