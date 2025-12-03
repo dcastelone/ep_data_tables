@@ -53,6 +53,11 @@ let handledCurrentComposition = false;
 let suppressBeforeInputInsertTextDuringComposition = false;
 let EP_DT_EDITOR_INFO = null;
 const __epDT_postWriteScheduled = new Set();
+// Track original table line from compositionstart for corruption recovery
+// This helps postWriteCanonicalize know where the table SHOULD be, not just where the attribute ended up
+let __epDT_compositionOriginalLine = { tblId: null, lineNum: null, timestamp: 0 };
+// Flag to prevent postWriteCanonicalize from interfering during column operations
+let __epDT_columnOperationInProgress = false;
 function isAndroidUA() {
   const ua = (navigator.userAgent || '').toLowerCase();
   const isAndroid = ua.includes('android');
@@ -914,6 +919,9 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
 
   let finalHtmlSegments = htmlSegments;
 
+  // Flag to track if we should skip the early return after mismatch detection
+  let skipMismatchReturn = false;
+
   if (htmlSegments.length !== rowMetadata.cols) {
      // log(`${logPrefix} NodeID#${nodeId}: *** MISMATCH DETECTED *** - Attempting reconstruction.`);
     console.warn('[ep_data_tables][diag] Segment/column mismatch', { nodeId, lineNum, segs: htmlSegments.length, cols: rowMetadata.cols, tblId: rowMetadata.tblId, row: rowMetadata.row });
@@ -922,8 +930,18 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     if (hasImageSelected) {
       // note only
     }
+    
+    // Skip scheduling mismatch repair during column operations - the column operation will handle it
+    // Also skip the early return so the table can still be rendered with current segments
+    if (__epDT_columnOperationInProgress) {
+      console.debug('[ep_data_tables][diag] mismatch-skip-scheduling', { nodeId, reason: 'column-operation-in-progress' });
+      skipMismatchReturn = true;
+      // Don't schedule repair, continue to table building below
+    }
+    
     // Defer canonicalization to after the render tick; do not mutate DOM here.
-    if (nodeId && !__epDT_postWriteScheduled.has(nodeId)) {
+    // But skip if column operation is in progress
+    else if (nodeId && !__epDT_postWriteScheduled.has(nodeId)) {
       __epDT_postWriteScheduled.add(nodeId);
       const fallbackLineNum = lineNum; // DOM-derived index as fallback
       const capturedTblId = rowMetadata.tblId;
@@ -934,36 +952,115 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
           if (!EP_DT_EDITOR_INFO) return;
           const ed = EP_DT_EDITOR_INFO;
           const docManager = ed.ep_data_tables_docManager || null;
+          
+          // Skip if a column operation is in progress - let the column operation handle its own cleanup
+          if (__epDT_columnOperationInProgress) {
+            console.debug('[ep_data_tables:postWriteCanonicalize] skipped - column operation in progress');
+            return;
+          }
+          
+          // CRITICAL: Pre-check editor state before calling ace_callWithAce
+          // Prevents crash when Etherpad's internal keyToNodeMap is corrupted
+          try {
+            const preCheckRep = ed.ace_getRep && ed.ace_getRep();
+            if (!preCheckRep || !preCheckRep.lines) {
+              console.debug('[ep_data_tables:postWriteCanonicalize] skipped - rep unavailable in pre-check');
+              return;
+            }
+          } catch (preCheckErr) {
+            console.debug('[ep_data_tables:postWriteCanonicalize] skipped - pre-check failed', preCheckErr?.message);
+            return;
+          }
+          
+          try {
           ed.ace_callWithAce((ace) => {
             try {
               const rep = ace.ace_getRep();
               if (!rep || !rep.lines) return;
-              // Robustly resolve the correct line by scanning for matching tbljson metadata.
+              
+              // Check if we have original line info from compositionstart
+              const origLineInfo = __epDT_compositionOriginalLine;
+              const hasOriginalLineInfo = origLineInfo && 
+                origLineInfo.tblId === capturedTblId && 
+                typeof origLineInfo.lineNum === 'number' &&
+                (Date.now() - origLineInfo.timestamp) < 5000; // Only use if recent (within 5 seconds)
+              
+              console.debug('[ep_data_tables:postWriteCanonicalize] start', {
+                nodeId, fallbackLineNum, capturedTblId, capturedRow, expectedCols,
+                hasDocManager: !!docManager,
+                originalLineInfo: hasOriginalLineInfo ? origLineInfo.lineNum : null,
+              });
+              if (!docManager || typeof docManager.getAttributeOnLine !== 'function') {
+                console.debug('[ep_data_tables:postWriteCanonicalize] abort: no documentAttributeManager available');
+                return;
+              }
+              // Robust line resolution: primary by attribute scan (tblId/row), then key lookup, then fallback.
               let ln = -1;
+              let attrScanLine = -1; // Track where attr scan finds the table (may differ from original)
               try {
-                const total = rep.lines.length();
-                for (let i = 0; i < total; i++) {
-                  let s = (docManager && typeof docManager.getAttributeOnLine === 'function')
-                    ? docManager.getAttributeOnLine(i, ATTR_TABLE_JSON)
-                    : null;
-                  if (!s) continue;
+                const totalScan = rep.lines.length();
+                for (let i = 0; i < totalScan; i++) {
+                  let sAttr = null;
+                  try { sAttr = docManager.getAttributeOnLine(i, ATTR_TABLE_JSON); } catch (_) {}
+                  if (!sAttr) continue;
                   try {
-                    const m = JSON.parse(s);
-                    if (m && m.tblId === capturedTblId && m.row === capturedRow) { ln = i; break; }
-                  } catch (_) {}
+                    const m = JSON.parse(sAttr);
+                    if (m && m.tblId === capturedTblId && m.row === capturedRow) {
+                      attrScanLine = i;
+                      ln = i;
+                      console.debug('[ep_data_tables:postWriteCanonicalize] found-by-attr-scan', { ln, tblId: m.tblId, row: m.row, cols: m.cols });
+                      break;
+                    }
+                  } catch (_) { /* ignore parse errors */ }
                 }
               } catch (scanErr) {
-                console.error('[ep_data_tables:postWriteCanonicalize] meta scan error', scanErr);
+                console.error('[ep_data_tables:postWriteCanonicalize] line scan error', scanErr);
+              }
+              
+              // CRITICAL: If we have original line info and it differs from attr-scan,
+              // check if the original line still has a valid table DOM
+              if (hasOriginalLineInfo && attrScanLine >= 0 && attrScanLine !== origLineInfo.lineNum) {
+                console.debug('[ep_data_tables:postWriteCanonicalize] line shift detected', {
+                  attrScanLine,
+                  originalLine: origLineInfo.lineNum,
+                  shift: attrScanLine - origLineInfo.lineNum,
+                });
+                
+                // Check if the original line still has a table DOM
+                const origEntry = rep.lines.atIndex(origLineInfo.lineNum);
+                if (origEntry?.lineNode) {
+                  const origTableEl = origEntry.lineNode.querySelector(
+                    `table.dataTable[data-tblId="${capturedTblId}"], table.dataTable[data-tblid="${capturedTblId}"]`
+                  );
+                  if (origTableEl) {
+                    console.debug('[ep_data_tables:postWriteCanonicalize] original line still has table DOM, preferring it', {
+                      originalLine: origLineInfo.lineNum,
+                      attrLine: attrScanLine,
+                    });
+                    ln = origLineInfo.lineNum;
+                  }
+                }
+              }
+              
+              if (ln < 0) {
+                try {
+                  if (rep.lines && typeof rep.lines.indexOfKey === 'function') {
+                    ln = rep.lines.indexOfKey(nodeId);
+                    console.debug('[ep_data_tables:postWriteCanonicalize] found-by-indexOfKey', { ln, nodeId });
+                  }
+                } catch (eIdx) {
+                  console.error('[ep_data_tables:postWriteCanonicalize] indexOfKey error; using fallback line', eIdx);
+                  ln = (typeof fallbackLineNum === 'number') ? fallbackLineNum : -1;
+                }
               }
               if (typeof ln !== 'number' || ln < 0) {
                 console.debug('[ep_data_tables:postWriteCanonicalize] abort: invalid line', { nodeId, ln });
                 return;
               }
-              let attrStr = (docManager && typeof docManager.getAttributeOnLine === 'function')
-                ? docManager.getAttributeOnLine(ln, ATTR_TABLE_JSON)
-                : null;
+              let attrStr = null;
+              try { attrStr = docManager.getAttributeOnLine(ln, ATTR_TABLE_JSON); } catch (_) { attrStr = null; }
               if (!attrStr) {
-                console.debug('[ep_data_tables:postWriteCanonicalize] abort: no tbljson on line', { ln });
+                console.debug('[ep_data_tables:postWriteCanonicalize] abort: no tbljson on resolved line', { ln, nodeId, capturedTblId, capturedRow });
                 return;
               }
               let metaAttr = null;
@@ -976,135 +1073,658 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                 console.debug('[ep_data_tables:postWriteCanonicalize] abort: invalid cols', { ln, metaAttr });
                 return;
               }
-              // Collect segments from this line and any immediate following broken fragments (no conflicting table row).
+              const entry = rep.lines.atIndex(ln);
+              const currentText = entry?.text || '';
+              const segs = currentText.split(DELIMITER);
               const needed = metaAttr.cols;
-              const segsCollected = [];
-              const linesUsed = [ln];
-              const total = rep.lines.length();
-              const sanitizeCell = (s) => {
+              const sanitize = (s) => {
                 const x = normalizeSoftWhitespace((s || '').replace(new RegExp(DELIMITER, 'g'), ' ').replace(/[\u200B\u200C\u200D\uFEFF]/g, ' '));
                 return x || ' ';
               };
-              const pushLineSegs = (idx) => {
-                const e = rep.lines.atIndex(idx);
-                const t = e?.text || '';
-                const arr = t.split(DELIMITER);
-                for (const seg of arr) segsCollected.push(seg);
-              };
-              // Start with the primary line.
-              pushLineSegs(ln);
-              // Pull from subsequent lines until we have enough, but stop if we hit a different table row id/row.
-              let i = ln + 1;
-              while (segsCollected.length < needed && i < total) {
-                let sNext = (docManager && typeof docManager.getAttributeOnLine === 'function')
-                  ? docManager.getAttributeOnLine(i, ATTR_TABLE_JSON)
-                  : null;
-                if (sNext) {
-                  try {
-                    const mNext = JSON.parse(sNext);
-                    if (!mNext || mNext.tblId !== capturedTblId || mNext.row !== capturedRow) break; // next row or different table
-                  } catch (_) { break; }
-                }
-                const eNext = rep.lines.atIndex(i);
-                const tNext = eNext?.text || '';
-                if (tNext && tNext.indexOf(DELIMITER) !== -1) {
-                  pushLineSegs(i);
-                  linesUsed.push(i);
-                } else {
-                  // No delimiter content; stop collecting.
-                  break;
-                }
-                i++;
-              }
-              // Build canonical from collected segs.
               const cells = new Array(needed);
-              for (let k = 0; k < needed; k++) cells[k] = sanitizeCell(segsCollected[k] || ' ');
-              const entry = rep.lines.atIndex(ln);
-              const currentText = entry?.text || '';
+                for (let i = 0; i < needed; i++) cells[i] = sanitize(segs[i] || ' ');
               const canonical = cells.join(DELIMITER);
-              if (canonical !== currentText) {
-                console.debug('[ep_data_tables:postWriteCanonicalize] applying canonical line', { ln, fromLen: currentText.length, toLen: canonical.length });
+              
+              // CRITICAL: Check if line actually has a table DOM element
+              // Text matching is NOT sufficient - the table structure may have been destroyed
+              let lineHasTableDOM = false;
+              try {
+                const lineNode = entry?.lineNode;
+                if (lineNode && typeof lineNode.querySelector === 'function') {
+                  const tableEl = lineNode.querySelector(
+                    `table.dataTable[data-tblId="${capturedTblId}"], table.dataTable[data-tblid="${capturedTblId}"]`
+                  );
+                  lineHasTableDOM = !!tableEl;
+                }
+              } catch (_) {}
+              
+              const textMatches = canonical === currentText;
+              const needsRepair = !textMatches || !lineHasTableDOM;
+              
+              // CRITICAL: Extract ALL character-level attributes BEFORE replacement to preserve them
+              // Uses a generic approach - any class that isn't table-related is treated as a styling attribute
+              const extractedStyling = [];
+              try {
+                const lineNode = entry?.lineNode;
+                if (lineNode && lineHasTableDOM) {
+                  const tableEl = lineNode.querySelector('table.dataTable');
+                  if (tableEl) {
+                    const tds = tableEl.querySelectorAll('td');
+                    tds.forEach((td, cellIdx) => {
+                      // Get all styled spans in this cell (skip delimiters and caret anchors)
+                      const spans = td.querySelectorAll('span:not(.ep-data_tables-delim):not(.ep-data_tables-caret-anchor)');
+                      let relPos = 0; // Position relative to cell start
+                      spans.forEach((span) => {
+                        const text = (span.textContent || '').replace(/\u00A0/g, ' '); // Normalize nbsp
+                        const textLen = text.length;
+                        if (textLen === 0) return;
+                        
+                        // Extract ALL classes except table-related ones
+                        // Convert class names to Etherpad attribute format
+                        const stylingAttrs = [];
+                        if (span.classList) {
+                          for (const cls of span.classList) {
+                            // Skip table-related classes
+                            if (cls.startsWith('tbljson-') || cls.startsWith('tblCell-')) continue;
+                            if (cls === 'ace-line' || cls.startsWith('ep-data_tables-')) continue;
+                            
+                            // Parse class name to attribute key-value pair
+                            // Etherpad uses formats like: "author-xyz", "font-size:12", "bold"
+                            if (cls.includes(':')) {
+                              // Format: "key:value" (e.g., "font-size:12", "color:red")
+                              const colonIdx = cls.indexOf(':');
+                              const key = cls.substring(0, colonIdx);
+                              const value = cls.substring(colonIdx + 1);
+                              stylingAttrs.push([key, value]);
+                            } else if (cls.includes('-')) {
+                              // Format: "key-value" (e.g., "author-a1b2c3")
+                              const dashIdx = cls.indexOf('-');
+                              const key = cls.substring(0, dashIdx);
+                              const value = cls.substring(dashIdx + 1);
+                              stylingAttrs.push([key, value]);
+                            } else {
+                              // Format: "key" only (e.g., "bold", "italic")
+                              // These are boolean attributes set to "true"
+                              stylingAttrs.push([cls, 'true']);
+                            }
+                          }
+                        }
+                        
+                        if (stylingAttrs.length > 0) {
+                          extractedStyling.push({
+                            cellIdx,
+                            relStart: relPos,
+                            len: textLen,
+                            text: text, // Store text for matching
+                            attrs: stylingAttrs,
+                          });
+                        }
+                        relPos += textLen;
+                      });
+                    });
+                  }
+                }
+                if (extractedStyling.length > 0) {
+                  console.debug('[ep_data_tables:postWriteCanonicalize] extracted styling', {
+                    ln, count: extractedStyling.length, 
+                    sample: extractedStyling.slice(0, 2).map(s => ({ cell: s.cellIdx, attrs: s.attrs })),
+                  });
+                }
+              } catch (extractErr) {
+                console.debug('[ep_data_tables:postWriteCanonicalize] styling extraction error (non-fatal)', extractErr?.message);
+              }
+              
+              if (needsRepair) {
+                console.debug('[ep_data_tables:postWriteCanonicalize] line needs repair', {
+                  ln,
+                  textMatches,
+                  lineHasTableDOM,
+                  fromLen: currentText.length,
+                  toLen: canonical.length,
+                });
+                if (!textMatches) {
                 ace.ace_performDocumentReplaceRange([ln, 0], [ln, currentText.length], canonical);
+                }
+                // Note: If lineHasTableDOM is false, orphan detection below will handle finding the real table
               } else {
-                console.debug('[ep_data_tables:postWriteCanonicalize] line already canonical', { ln });
+                console.debug('[ep_data_tables:postWriteCanonicalize] line already canonical', { ln, lineHasTableDOM });
               }
               let offset = 0;
-              for (let ci = 0; ci < cells.length; ci++) {
-                const len = cells[ci].length;
+              for (let i = 0; i < cells.length; i++) {
+                const len = cells[i].length;
                 if (len > 0) {
-                  ace.ace_performDocumentApplyAttributesToRange([ln, offset], [ln, offset + len], [[ATTR_CELL, String(ci)]]);
+                  ace.ace_performDocumentApplyAttributesToRange([ln, offset], [ln, offset + len], [[ATTR_CELL, String(i)]]);
                 }
                 offset += len;
-                if (ci < cells.length - 1) offset += DELIMITER.length;
+                if (i < cells.length - 1) offset += DELIMITER.length;
               }
+              
+              // Re-apply extracted styling attributes using TEXT-BASED MATCHING
+              // This handles cases where text content shifts (e.g., Grammarly changes)
+              if (extractedStyling.length > 0) {
+                let appliedCount = 0;
+                try {
+                  for (const style of extractedStyling) {
+                    const cellIdx = style.cellIdx;
+                    const cellContent = cells[cellIdx] || '';
+                    const styledText = style.text;
+                    
+                    if (!styledText || styledText.length === 0 || !cellContent) continue;
+                    
+                    // Find where the styled text appears in the NEW cell content
+                    let foundPos = cellContent.indexOf(styledText);
+                    
+                    // If not found, try case-insensitive match (for capitalization changes)
+                    if (foundPos === -1) {
+                      const lowerCell = cellContent.toLowerCase();
+                      const lowerStyled = styledText.toLowerCase();
+                      foundPos = lowerCell.indexOf(lowerStyled);
+                    }
+                    
+                    if (foundPos === -1) continue; // Text not found in cell
+                    
+                    // Calculate absolute position in the line
+                    let absStart = 0;
+                    for (let c = 0; c < cellIdx; c++) {
+                      absStart += (cells[c]?.length || 0) + DELIMITER.length;
+                    }
+                    absStart += foundPos;
+                    const absEnd = absStart + styledText.length;
+                    
+                    if (style.attrs.length > 0) {
+                      ace.ace_performDocumentApplyAttributesToRange(
+                        [ln, absStart],
+                        [ln, absEnd],
+                        style.attrs
+                      );
+                      appliedCount++;
+                    }
+                  }
+                  if (appliedCount > 0) {
+                    console.debug('[ep_data_tables:postWriteCanonicalize] re-applied styling', {
+                      ln, applied: appliedCount, total: extractedStyling.length,
+                    });
+                  }
+                } catch (applyErr) {
+                  console.debug('[ep_data_tables:postWriteCanonicalize] styling re-apply error (non-fatal)', applyErr?.message);
+                }
+              }
+              
               try {
                 ed.ep_data_tables_applyMeta(ln, metaAttr.tblId, metaAttr.row, metaAttr.cols, ace.ace_getRep(), ed, JSON.stringify(metaAttr), docManager);
               } catch (metaErr) {
                 console.error('[ep_data_tables:postWriteCanonicalize] meta apply error', metaErr);
               }
-              // Remove duplicate occurrences of the same tblId/row on other lines.
+              // Detect orphan lines: lines with same tblId/row attribute OR
+              // lines with tbljson-* CSS classes but no table element (DOM-based orphan detection)
+              // This preserves user data that was split into multiple lines due to composition/IME corruption
+              const orphanLines = [];
+              const seenOrphanLines = new Set(); // Avoid duplicate detection
               try {
                 const total = rep.lines.length();
-                const dupLines = [];
                 for (let li = 0; li < total; li++) {
                   if (li === ln) continue;
-                  let sOther = (docManager && typeof docManager.getAttributeOnLine === 'function')
-                    ? docManager.getAttributeOnLine(li, ATTR_TABLE_JSON)
-                    : null;
-                  if (!sOther) continue;
+                  
+                  // Method 1: Check line attribute (existing approach)
+                  let sOther = null;
+                  try { sOther = docManager.getAttributeOnLine(li, ATTR_TABLE_JSON); } catch (_) { sOther = null; }
+                  if (sOther) {
                   let mOther = null;
                   try { mOther = JSON.parse(sOther); } catch (_) { mOther = null; }
                   if (mOther && mOther.tblId === capturedTblId && mOther.row === capturedRow) {
-                    dupLines.push(li);
+                      const orphanEntry = rep.lines.atIndex(li);
+                      const orphanText = orphanEntry?.text || '';
+                      orphanLines.push({ lineNum: li, text: orphanText, meta: mOther, source: 'attr' });
+                      seenOrphanLines.add(li);
+                      continue;
+                    }
+                  }
+                  
+                  // Method 2: DOM-based detection - look for tbljson-* OR tblCell-* class spans WITHOUT a table parent
+                  // This catches orphan lines that have CSS classes but no line-level attribute
+                  // NOTE: Browser may strip tbljson-* during IME but keep tblCell-*, so check both!
+                  if (seenOrphanLines.has(li)) continue;
+                  try {
+                    const lineEntry = rep.lines.atIndex(li);
+                    const lineNode = lineEntry?.lineNode;
+                    if (lineNode) {
+                      // Check if this line has tbljson-* or tblCell-* class elements but NO table element
+                      const hasTable = lineNode.querySelector('table.dataTable');
+                      if (!hasTable) {
+                        // Check for tbljson-* spans first (can decode metadata)
+                        const tbljsonSpan = lineNode.querySelector('[class*="tbljson-"]');
+                        if (tbljsonSpan) {
+                          // Extract tblId from the class
+                          for (const cls of tbljsonSpan.classList) {
+                            if (cls.startsWith('tbljson-')) {
+                              try {
+                                const decoded = JSON.parse(atob(cls.substring(8)));
+                                if (decoded && decoded.tblId === capturedTblId && decoded.row === capturedRow) {
+                                  const orphanText = lineEntry?.text || '';
+                                  orphanLines.push({
+                                    lineNum: li,
+                                    text: orphanText,
+                                    meta: decoded,
+                                    source: 'dom-class-tbljson',
+                                  });
+                                  seenOrphanLines.add(li);
+                                  console.debug('[ep_data_tables:postWriteCanonicalize] detected tbljson DOM orphan', {
+                                    lineNum: li, tblId: decoded.tblId, row: decoded.row, textLen: orphanText.length,
+                                  });
+                                  break;
+                                }
+                              } catch (_) {}
+                            }
+                          }
+                        }
+                        
+                        // Also check for tblCell-* spans (no encoded metadata, assume it's our target)
+                        // This catches orphans where browser stripped tbljson-* but kept tblCell-*
+                        if (!seenOrphanLines.has(li)) {
+                          const tblCellSpan = lineNode.querySelector('[class*="tblCell-"]');
+                          if (tblCellSpan) {
+                            const orphanText = lineEntry?.text || '';
+                            // Only add if the text contains delimiters or meaningful content
+                            if (orphanText.includes(DELIMITER) || orphanText.trim().length > 0) {
+                              orphanLines.push({
+                                lineNum: li,
+                                text: orphanText,
+                                meta: { tblId: capturedTblId, row: capturedRow, cols: expectedCols },
+                                source: 'dom-class-tblCell',
+                              });
+                              seenOrphanLines.add(li);
+                              console.debug('[ep_data_tables:postWriteCanonicalize] detected tblCell DOM orphan', {
+                                lineNum: li, capturedTblId, capturedRow, textLen: orphanText.length,
+                              });
+                            }
+                          }
+                        }
+                      }
+                    }
+                  } catch (domErr) {
+                    console.error('[ep_data_tables:postWriteCanonicalize] DOM orphan detection error', domErr);
                   }
                 }
-                // Also mark fragment lines we used to rebuild as removable.
-                for (const li of linesUsed) {
-                  if (li !== ln && !dupLines.includes(li)) dupLines.push(li);
+              } catch (scanOrphanErr) {
+                console.error('[ep_data_tables:postWriteCanonicalize] orphan scan error', scanOrphanErr);
+                  }
+              
+              if (orphanLines.length > 0) {
+                // CRITICAL: Re-evaluate primary line selection using LIVE DOM query
+                // The lineNode references from rep.lines might be stale after DOM mutations.
+                // Query the actual document to find which ace-line currently has the table.
+                let mainEntry = rep.lines.atIndex(ln);
+                
+                // Use live DOM query to find the line that actually has our table
+                let lineWithTableIdx = -1;
+                  try {
+                  const innerDoc = node?.ownerDocument || document;
+                  const editorBody = innerDoc.getElementById('innerdocbody') || innerDoc.body;
+                  if (editorBody) {
+                    const allAceLines = editorBody.querySelectorAll('div.ace-line');
+                    for (let ai = 0; ai < allAceLines.length; ai++) {
+                      const aceLine = allAceLines[ai];
+                      // Look for our specific table by tblId and row
+                      const tableEl = aceLine.querySelector(
+                        `table.dataTable[data-tblId="${capturedTblId}"][data-row="${capturedRow}"], ` +
+                        `table.dataTable[data-tblid="${capturedTblId}"][data-row="${capturedRow}"]`
+                      );
+                      if (tableEl) {
+                        lineWithTableIdx = ai;
+                        console.debug('[ep_data_tables:postWriteCanonicalize] LIVE DOM found table', {
+                          domIndex: ai, aceLineId: aceLine.id, tblId: capturedTblId, row: capturedRow,
+                        });
+                              break;
+                            }
+                          }
+                  }
+                } catch (domQueryErr) {
+                  console.error('[ep_data_tables:postWriteCanonicalize] live DOM query error', domQueryErr);
                 }
-                if (dupLines.length > 0) {
-                  // Delete from bottom to top to avoid index shifts
-                  dupLines.sort((a, b) => b - a);
-                  for (const li of dupLines) {
-                    console.warn('[ep_data_tables:postWriteCanonicalize] removing duplicate table row line', { keepLine: ln, dupLine: li, tblId: capturedTblId, row: capturedRow });
-                    try {
-                      if (docManager && typeof docManager.removeAttributeOnLine === 'function') {
-                        docManager.removeAttributeOnLine(li, ATTR_TABLE_JSON);
+                
+                // Check if we need to swap primary
+                // If the live DOM shows the table is on a different line than our current primary,
+                // we need to swap to use that line as the primary
+                if (lineWithTableIdx >= 0 && lineWithTableIdx !== ln) {
+                  // Find if this line is in our orphan list
+                  const orphanIdx = orphanLines.findIndex(o => o.lineNum === lineWithTableIdx);
+                  if (orphanIdx >= 0) {
+                    console.warn('[ep_data_tables:postWriteCanonicalize] SWAPPING primary via LIVE DOM: table found on orphan line', {
+                      oldPrimary: ln,
+                      newPrimary: lineWithTableIdx,
+                      orphanIdx,
+                    });
+                    
+                    // Move current "primary" to orphan list
+                    const formerPrimary = {
+                      lineNum: ln,
+                      text: mainEntry?.text || '',
+                      meta: metaAttr,
+                      source: 'swapped-to-orphan',
+                    };
+
+                    // Swap: orphan becomes primary
+                    const newPrimary = orphanLines[orphanIdx];
+                    ln = newPrimary.lineNum;
+                    metaAttr = newPrimary.meta;
+                    mainEntry = rep.lines.atIndex(ln);
+                    
+                    // Remove new primary from orphan list and add former primary
+                    orphanLines.splice(orphanIdx, 1);
+                    orphanLines.push(formerPrimary);
+                    
+                    // Re-read cells from new primary
+                    const newText = mainEntry?.text || '';
+                    const newSegs = newText.split(DELIMITER);
+                    for (let i = 0; i < needed; i++) {
+                      cells[i] = sanitize(newSegs[i] || ' ');
+                    }
+                  }
+                } else if (lineWithTableIdx < 0) {
+                  // No line has the table - this is bad, but we should still try to preserve content
+                  console.warn('[ep_data_tables:postWriteCanonicalize] WARNING: no line has table DOM for tblId/row', {
+                    capturedTblId, capturedRow, primaryLn: ln, orphanCount: orphanLines.length,
+                  });
+                }
+                
+                console.warn('[ep_data_tables:postWriteCanonicalize] orphan lines detected - merging content', {
+                  keepLine: ln, orphans: orphanLines.map(o => ({ line: o.lineNum, textLen: o.text.length })),
+                  tableFoundOnLine: lineWithTableIdx,
+                });
+                
+                // CRITICAL FIX: Extract cell content from LIVE DOM table, not from line text!
+                // The line text may contain non-table content (like "1" from a previous line)
+                // that got mixed in due to IME corruption. The DOM table is the source of truth.
+                const mainText = mainEntry?.text || '';
+                const mainSegs = mainText.split(DELIMITER);
+                const mergedCells = new Array(needed);
+                
+                // Try to get clean cell content from the DOM table
+                let usedDomContent = false;
+                if (lineWithTableIdx >= 0) {
+                  try {
+                    const innerDoc = node?.ownerDocument || document;
+                    const editorBody = innerDoc.getElementById('innerdocbody') || innerDoc.body;
+                    const allAceLines = editorBody?.querySelectorAll('div.ace-line');
+                    const tableAceLine = allAceLines?.[lineWithTableIdx];
+                    const tableEl = tableAceLine?.querySelector(
+                      `table.dataTable[data-tblId="${capturedTblId}"], table.dataTable[data-tblid="${capturedTblId}"]`
+                    );
+                    if (tableEl) {
+                      const tr = tableEl.querySelector('tbody > tr');
+                      if (tr && tr.children.length === needed) {
+                        for (let i = 0; i < needed; i++) {
+                          const td = tr.children[i];
+                          // Extract text content, excluding delimiters and special elements
+                          let cellText = '';
+                          for (const child of td.childNodes) {
+                            if (child.nodeType === 3) { // Text node
+                              cellText += child.textContent || '';
+                            } else if (child.nodeType === 1) { // Element
+                              const el = child;
+                              // Skip delimiter spans and caret anchors
+                              if (el.classList?.contains('ep-data_tables-delim')) continue;
+                              if (el.classList?.contains('ep-data_tables-caret-anchor')) continue;
+                              if (el.classList?.contains('ep-data_tables-resize-handle')) continue;
+                              cellText += el.textContent || '';
+                            }
+                          }
+                          mergedCells[i] = sanitize(cellText || ' ');
+                        }
+                        usedDomContent = true;
+                        console.debug('[ep_data_tables:postWriteCanonicalize] using DOM table content for merge base', {
+                          cells: mergedCells.map(c => c.slice(0, 20)),
+                        });
                       }
+                    }
+                  } catch (domExtractErr) {
+                    console.error('[ep_data_tables:postWriteCanonicalize] DOM content extraction error', domExtractErr);
+                  }
+                }
+                
+                // Fallback to line text if DOM extraction failed
+                if (!usedDomContent) {
+                for (let i = 0; i < needed; i++) {
+                  mergedCells[i] = sanitize(mainSegs[i] || ' ');
+                  }
+                  console.debug('[ep_data_tables:postWriteCanonicalize] using line text for merge base (DOM extraction failed)');
+                }
+
+                // Extract content from orphan lines and merge into cells
+                        for (const orphan of orphanLines) {
+                  const orphanSegs = orphan.text.split(DELIMITER);
+                  // Each orphan segment represents content that should be in corresponding cell
+                  // Only merge if orphan has non-trivial content
+                  for (let i = 0; i < Math.min(orphanSegs.length, needed); i++) {
+                    const orphanContent = sanitize(orphanSegs[i] || '');
+                    // Skip if orphan cell is empty or just whitespace
+                    if (!orphanContent || orphanContent.trim() === '') continue;
+                    // Skip if main cell already contains this content (avoid duplication)
+                    const mainCellTrimmed = (mergedCells[i] || '').trim();
+                    const orphanTrimmed = orphanContent.trim();
+                    if (mainCellTrimmed.includes(orphanTrimmed)) continue;
+                    // If main cell is empty/whitespace, replace; otherwise append
+                    if (!mainCellTrimmed) {
+                      mergedCells[i] = orphanContent;
+                    } else {
+                      // Append orphan content to existing cell content (preserve user data)
+                      mergedCells[i] = mainCellTrimmed + orphanTrimmed;
+                                  }
+                    console.debug('[ep_data_tables:postWriteCanonicalize] merged orphan content', {
+                      cellIdx: i, orphanLine: orphan.lineNum, orphanContent, mergedResult: mergedCells[i],
+                    });
+                  }
+                }
+                
+                // Apply merged content to main line
+                const mergedCanonical = mergedCells.join(DELIMITER);
+                if (mergedCanonical !== mainText) {
+                  console.debug('[ep_data_tables:postWriteCanonicalize] applying merged canonical line', {
+                    ln, fromLen: mainText.length, toLen: mergedCanonical.length, mergedCells,
+                  });
+                  ace.ace_performDocumentReplaceRange([ln, 0], [ln, mainText.length], mergedCanonical);
+
+                  // Re-apply cell attributes after merge
+                  let mergeOffset = 0;
+                  for (let i = 0; i < mergedCells.length; i++) {
+                    const cellLen = mergedCells[i].length;
+                        if (cellLen > 0) {
+                      ace.ace_performDocumentApplyAttributesToRange([ln, mergeOffset], [ln, mergeOffset + cellLen], [[ATTR_CELL, String(i)]]);
+                        }
+                    mergeOffset += cellLen;
+                    if (i < mergedCells.length - 1) mergeOffset += DELIMITER.length;
+                  }
+                  
+                  // CRITICAL: Re-apply line-level tbljson attribute after merge
+                  // Without this, the line won't render as a table!
+                  try {
+                    const repAfterMerge = ace.ace_getRep();
+                    ed.ep_data_tables_applyMeta(ln, capturedTblId, capturedRow, expectedCols, repAfterMerge, ed, JSON.stringify(metaAttr), docManager);
+                    console.debug('[ep_data_tables:postWriteCanonicalize] re-applied tbljson after merge', {
+                      ln, tblId: capturedTblId, row: capturedRow, cols: expectedCols,
+                    });
+                  } catch (metaMergeErr) {
+                    console.error('[ep_data_tables:postWriteCanonicalize] failed to re-apply tbljson after merge', metaMergeErr);
+                  }
+                      }
+
+                // Now safely delete orphan lines (bottom-up to preserve line numbers)
+                // CRITICAL: Validate each line before operating to prevent keyToNodeMap errors
+                orphanLines.sort((a, b) => b.lineNum - a.lineNum).forEach((orphan) => {
+                    try {
+                      // Re-fetch rep to get current state after any previous deletions
+                      const repCheck = ace.ace_getRep();
+                      if (!repCheck || !repCheck.lines) {
+                        console.warn('[ep_data_tables:postWriteCanonicalize] rep invalid, skipping orphan removal');
+                        return;
+                      }
+                      const currentLineCount = repCheck.lines.length();
+                      if (orphan.lineNum >= currentLineCount) {
+                        console.debug('[ep_data_tables:postWriteCanonicalize] orphan line no longer exists', {
+                          orphanLine: orphan.lineNum, currentLineCount,
+                        });
+                        return;
+                      }
+                      // Verify line entry exists
+                      const orphanEntry = repCheck.lines.atIndex(orphan.lineNum);
+                      if (!orphanEntry) {
+                        console.debug('[ep_data_tables:postWriteCanonicalize] orphan line has no entry', {
+                          orphanLine: orphan.lineNum,
+                        });
+                        return;
+                      }
+                      
+                      try {
+                        if (docManager && typeof docManager.removeAttributeOnLine === 'function') {
+                        docManager.removeAttributeOnLine(orphan.lineNum, ATTR_TABLE_JSON);
+                        }
                     } catch (remErr) {
-                      console.error('[ep_data_tables:postWriteCanonicalize] removeAttributeOnLine error', remErr);
+                      console.debug('[ep_data_tables:postWriteCanonicalize] removeAttributeOnLine error (non-fatal)', remErr?.message);
                     }
+                    console.debug('[ep_data_tables:postWriteCanonicalize] removing orphan line (content already merged)', {
+                      orphanLine: orphan.lineNum,
+                    });
+                    ace.ace_performDocumentReplaceRange([orphan.lineNum, 0], [orphan.lineNum + 1, 0], '');
+                  } catch (orphanRemErr) {
+                    console.error('[ep_data_tables:postWriteCanonicalize] orphan line removal error', {
+                      orphanLine: orphan.lineNum,
+                      error: orphanRemErr?.message || orphanRemErr,
+                    });
+                    }
+                  });
+                  
+                // Clean up spurious blank lines between this table row and the next
+                // These can be created when orphan content gets merged and lines shift
+                try {
+                  const repAfterOrphanRemoval = ace.ace_getRep();
+                  const currentLineNum = ln; // The line we just merged into
+                  const nextRowNum = capturedRow + 1;
+                  
+                  // Find the line with the next table row (if any)
+                  let nextRowLineNum = -1;
+                  const totalAfter = repAfterOrphanRemoval.lines.length();
+                  for (let li = currentLineNum + 1; li < totalAfter && li < currentLineNum + 10; li++) {
                     try {
-                      const entryDup = rep.lines.atIndex(li);
-                      const dupText = entryDup?.text || '';
-                      const onlyWhitespace = !dupText || dupText.trim().length === 0;
-                      const containsDelims = !!dupText && dupText.indexOf(DELIMITER) !== -1;
-                      if (onlyWhitespace || containsDelims) {
-                        // Remove the entire line.
-                        const isLast = (li >= rep.lines.length() - 1);
-                        const start = [li, 0];
-                        const end = isLast ? [li, dupText.length] : [li + 1, 0];
-                        ace.ace_performDocumentReplaceRange(start, end, '');
+                      const attrStr = docManager.getAttributeOnLine(li, ATTR_TABLE_JSON);
+                      if (attrStr) {
+                        const meta = JSON.parse(attrStr);
+                        if (meta && meta.tblId === capturedTblId && meta.row === nextRowNum) {
+                          nextRowLineNum = li;
+                          break;
+                        }
                       }
-                    } catch (dupErr) {
-                      console.error('[ep_data_tables:postWriteCanonicalize] duplicate line cleanup error', dupErr);
+                    } catch (_) {}
+                  }
+                  
+                  // If there are blank lines between current row and next row, remove them
+                  if (nextRowLineNum > currentLineNum + 1) {
+                    const blankLinesToRemove = [];
+                    for (let li = currentLineNum + 1; li < nextRowLineNum; li++) {
+                      const lineEntry = repAfterOrphanRemoval.lines.atIndex(li);
+                      const lineText = lineEntry?.text || '';
+                      // Check if line is blank (empty or just whitespace)
+                      if (!lineText.trim() || lineText === '\n') {
+                        blankLinesToRemove.push(li);
+                      }
+                    }
+                    
+                    // Remove blank lines bottom-up to preserve line numbers
+                    blankLinesToRemove.sort((a, b) => b - a).forEach((blankLineNum) => {
+                      try {
+                        console.debug('[ep_data_tables:postWriteCanonicalize] removing spurious blank line between table rows', {
+                          blankLineNum, betweenRows: [capturedRow, nextRowNum],
+                        });
+                        ace.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
+                      } catch (blankRemErr) {
+                        console.error('[ep_data_tables:postWriteCanonicalize] blank line removal error', blankRemErr);
+                      }
+                    });
+                  }
+                } catch (cleanupErr) {
+                  console.error('[ep_data_tables:postWriteCanonicalize] blank line cleanup error', cleanupErr);
+                }
+                  
+                  try { ace.ace_fastIncorp(5); } catch (_) {}
+                }
+              
+              // ALWAYS run blank line cleanup after repair, even if there were no orphans
+              // Grammarly and other extensions can create blank lines without triggering orphan detection
+              try {
+                const repFinal = ace.ace_getRep();
+                if (repFinal && repFinal.lines) {
+                  const finalLineNum = ln; // The line we repaired
+                  const totalFinal = repFinal.lines.length();
+                  
+                  // Look for blank lines immediately after this table row
+                  const blankLinesToClean = [];
+                  for (let li = finalLineNum + 1; li < totalFinal && li < finalLineNum + 5; li++) {
+                    const lineEntry = repFinal.lines.atIndex(li);
+                    const lineText = lineEntry?.text || '';
+                    
+                    // Check if this is a table row (should stop scanning)
+                    let isTableRow = false;
+                    try {
+                      const attrStr = docManager.getAttributeOnLine(li, ATTR_TABLE_JSON);
+                      if (attrStr) isTableRow = true;
+                    } catch (_) {}
+                    
+                    if (isTableRow) break; // Stop at next table row
+                    
+                    // Check if blank line (empty or just whitespace)
+                    if (!lineText.trim() || lineText === '\n') {
+                      blankLinesToClean.push(li);
+                    } else {
+                      break; // Stop at first non-blank, non-table line
                     }
                   }
+                  
+                  // Remove blank lines bottom-up
+                  if (blankLinesToClean.length > 0) {
+                    blankLinesToClean.sort((a, b) => b - a).forEach((blankLineNum) => {
+                      try {
+                        const checkRep = ace.ace_getRep();
+                        if (checkRep && blankLineNum < checkRep.lines.length()) {
+                          console.debug('[ep_data_tables:postWriteCanonicalize] removing blank line after repair', {
+                            blankLineNum, afterRow: capturedRow,
+                          });
+                          ace.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
+                        }
+                      } catch (_) {}
+                    });
+                  }
                 }
-              } catch (dedupeErr) {
-                console.error('[ep_data_tables:postWriteCanonicalize] dedupe scan error', dedupeErr);
+              } catch (finalCleanupErr) {
+                console.debug('[ep_data_tables:postWriteCanonicalize] final blank cleanup error (non-fatal)', finalCleanupErr?.message);
               }
-            } catch (err) {
-              console.error('[ep_data_tables:postWriteCanonicalize] error', err);
+              
+              try { ace.ace_fastIncorp(5); } catch (_) {}
+              } catch (innerErr) {
+                console.error('[ep_data_tables:postWriteCanonicalize] inner callback error', {
+                  error: innerErr?.message || innerErr,
+                });
             }
           }, 'ep_data_tables:postwrite-canonicalize', true);
+          } catch (aceCallErr) {
+            // This catches errors from ace_callWithAce itself (Etherpad internal state corruption)
+            console.warn('[ep_data_tables:postWriteCanonicalize] ace_callWithAce failed - editor state may need refresh', {
+              error: aceCallErr?.message || aceCallErr,
+            });
+          }
         } finally {
           __epDT_postWriteScheduled.delete(nodeId);
+          // Clear the original line info if it was for this table
+          if (__epDT_compositionOriginalLine.tblId === capturedTblId) {
+            __epDT_compositionOriginalLine = { tblId: null, lineNum: null, timestamp: 0 };
+          }
         }
       }, 0);
     }
     // Stop here; let the next render reflect the canonicalized text.
-    return cb();
+    // BUT: if column operation is in progress, continue to render the table with current segments
+    if (!skipMismatchReturn) {
+      return cb();
+    }
+    // Otherwise, fall through to table building below
   } else {
      // log(`${logPrefix} NodeID#${nodeId}: Segment count matches metadata cols (${rowMetadata.cols}). Using original segments.`);
   }
@@ -1937,10 +2557,16 @@ exports.aceInitialized = (h, ctx) => {
     const attachListeners = ($inner, $iframeOuter, $iframeInner, innerDocBody) => {
       try {
       const platformLabel = () => (isAndroidUA() ? 'android' : (isIOSUA() ? 'ios' : 'desktop'));
-      const sanitizeCellContent = (cellText = '') => {
+      const sanitizeCellContent = (cellText = '', preserveZeroWidth = false) => {
         let sanitized = normalizeSoftWhitespace(cellText || '')
-          .replace(new RegExp(DELIMITER, 'g'), ' ')
-          .replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+          .replace(new RegExp(DELIMITER, 'g'), ' ');
+        // Only strip zero-width characters if not preserving them
+        // Images use ZWS (U+200B) as placeholder - if we strip it, images are lost
+        // Auto-detect: if the content contains ZWS, preserve it (likely image content)
+        const hasZWS = /[\u200B\u200C\u200D\uFEFF]/.test(sanitized);
+        if (!preserveZeroWidth && !hasZWS) {
+          sanitized = sanitized.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+        }
         if (!sanitized) sanitized = ' ';
         return sanitized;
       };
@@ -1978,7 +2604,7 @@ exports.aceInitialized = (h, ctx) => {
       let suppressNextInputCommit = false;
       // One-shot guard to skip the first desktop beforeinput commit after a compositionend-driven commit.
       let suppressNextBeforeinputCommitOnce = false;
-      let desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
+      let desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1, snapshot: null, snapshotMeta: null };
 
       const getTableMetadataForLine = (lineNum) => {
         let lineAttrString = docManager && docManager.getAttributeOnLine
@@ -2134,6 +2760,408 @@ exports.aceInitialized = (h, ctx) => {
         return -1;
       };
 
+      // Helper to extract ALL character-level styling from a line's DOM table
+      // Returns array of { cellIdx, relStart, len, text, attrs }
+      const extractStylingFromLineDOM = (lineNode) => {
+        const extractedStyling = [];
+        try {
+          if (!lineNode) return extractedStyling;
+          const tableEl = lineNode.querySelector('table.dataTable');
+          if (!tableEl) return extractedStyling;
+          
+          const tds = tableEl.querySelectorAll('td');
+          let totalSpansProcessed = 0;
+          let totalSpansWithAttrs = 0;
+          tds.forEach((td, cellIdx) => {
+            // Get all styled spans in this cell (skip delimiters, caret anchors, and nested image UI spans)
+            const spans = td.querySelectorAll('span:not(.ep-data_tables-delim):not(.ep-data_tables-caret-anchor):not(.image-inner):not(.image-resize-handle)');
+            let relPos = 0; // Position relative to cell start
+            spans.forEach((span) => {
+              totalSpansProcessed++;
+              // Skip if this span is nested inside another span we're processing (e.g., image inner content)
+              const parentSpan = span.parentElement?.closest?.('span[class*="image:"]');
+              if (parentSpan && parentSpan !== span) {
+                // This is a nested span inside an image - skip, we'll capture from the outer image span
+                return;
+              }
+              
+              // Detect if this is an image-related span (comprehensive check)
+              // Includes: inline-image, image-placeholder, image:URL, image-height:, image-width:, imageCssAspectRatio:, image-id-
+              const isImageSpan = span.classList && (
+                span.classList.contains('inline-image') ||
+                span.classList.contains('image-placeholder') ||
+                span.classList.contains('character') ||
+                Array.from(span.classList).some(c => 
+                  c.startsWith('image:') || 
+                  c.startsWith('image-height:') || 
+                  c.startsWith('image-width:') ||
+                  c.startsWith('imageCssAspectRatio:') ||
+                  c.startsWith('image-id-') ||
+                  c.startsWith('image-float-')
+                )
+              );
+              
+              // For images, get direct text content only (exclude nested span content)
+              // This prevents double-counting text from image-inner spans
+              let text;
+              if (isImageSpan) {
+                // Get only direct text nodes, not nested span content
+                text = Array.from(span.childNodes)
+                  .filter(n => n.nodeType === 3) // TEXT_NODE
+                  .map(n => n.nodeValue || '')
+                  .join('')
+                  .replace(/\u00A0/g, ' ');
+              } else {
+                text = (span.textContent || '').replace(/\u00A0/g, ' '); // Normalize nbsp
+              }
+              
+              const textLen = text.length;
+              if (textLen === 0) return;
+              
+              // Extract ALL classes except table-related ones
+              const stylingAttrs = [];
+              if (span.classList) {
+                for (const cls of span.classList) {
+                  // Skip table-related classes
+                  if (cls.startsWith('tbljson-') || cls.startsWith('tblCell-')) continue;
+                  if (cls === 'ace-line' || cls.startsWith('ep-data_tables-')) continue;
+                  
+                  // Parse class name to attribute key-value pair
+                  // Etherpad uses: attributeName:value (colon) or attributeName-value (hyphen)
+                  if (cls.includes(':')) {
+                    // Colon separator: image:https%3A%2F%2F..., font-size:12, image-height:298px, etc.
+                    const colonIdx = cls.indexOf(':');
+                    stylingAttrs.push([cls.substring(0, colonIdx), cls.substring(colonIdx + 1)]);
+                  } else if (cls.includes('-')) {
+                    // Hyphen separator - need smart parsing based on known attribute prefixes
+                    // Some are boolean flags that should be kept intact
+                    const knownBooleanClasses = [
+                      'inline-image', 'image-placeholder', 'image-inner', 'image-resize-handle'
+                    ];
+                    if (knownBooleanClasses.includes(cls)) {
+                      stylingAttrs.push([cls, 'true']);
+                    } else {
+                      // Known multi-word attribute prefixes (split AFTER these)
+                      const knownPrefixes = [
+                        'image-id-',      // image-id-XXXX-XXXX-XXXX
+                        'image-float-',   // image-float-none, image-float-left, etc.
+                        'font-family-',   // font-family names can have hyphens
+                      ];
+                      let matched = false;
+                      for (const prefix of knownPrefixes) {
+                        if (cls.startsWith(prefix)) {
+                          const attrName = prefix.slice(0, -1); // Remove trailing hyphen
+                          const attrValue = cls.substring(prefix.length);
+                          stylingAttrs.push([attrName, attrValue]);
+                          matched = true;
+                          console.debug('[ep_data_tables:extractStyling] prefix-match', { cls, prefix, attrName, attrValue });
+                          break;
+                        }
+                      }
+                      if (!matched) {
+                        // Default: split at FIRST hyphen (standard Etherpad format)
+                        // e.g., "author-abc123" → ["author", "abc123"]
+                        const dashIdx = cls.indexOf('-');
+                        const attrName = cls.substring(0, dashIdx);
+                        const attrValue = cls.substring(dashIdx + 1);
+                        stylingAttrs.push([attrName, attrValue]);
+                        // Log if this looks like it might be wrong (multi-hyphen class)
+                        if (attrValue.includes('-') && cls.startsWith('image')) {
+                          console.warn('[ep_data_tables:extractStyling] POSSIBLE MISPARSED IMAGE CLASS', { cls, attrName, attrValue });
+                        }
+                      }
+                    }
+                  } else {
+                    stylingAttrs.push([cls, 'true']);
+                  }
+                }
+              }
+              
+              if (stylingAttrs.length > 0) {
+                totalSpansWithAttrs++;
+                // Store DOM cell length to adjust for content length differences during reapplication
+                // NOTE: td.textContent includes the delimiter span for cells 1+, so we subtract 1 for those
+                let domCellLen = td.textContent?.replace(/\u00A0/g, ' ').length || 0;
+                if (cellIdx > 0 && domCellLen > 0) {
+                  domCellLen -= 1; // Exclude delimiter character from length
+                }
+                // Mark if this is an image for special handling during re-application
+                const isImage = isImageSpan || stylingAttrs.some(([k]) => k === 'image' || k === 'inline');
+                extractedStyling.push({ cellIdx, relStart: relPos, len: textLen, text, attrs: stylingAttrs, domCellLen, isImage });
+              }
+              relPos += textLen;
+            });
+          });
+          // Log extraction summary for debugging (always log to help debug issues)
+          const summary = extractedStyling.map(s => ({
+            cell: s.cellIdx,
+            text: s.text.slice(0, 12).replace(/[\u200B]/g, '⁰'), // Show zero-width as visible char
+            attrs: s.attrs.map(a => a[0]).join(','),
+            isImage: s.isImage,
+          }));
+          console.debug('[ep_data_tables:extractStyling] extracted', {
+            count: extractedStyling.length,
+            spansProcessed: totalSpansProcessed,
+            spansWithAttrs: totalSpansWithAttrs,
+            byCells: [...new Set(extractedStyling.map(s => s.cellIdx))].sort(),
+            summary: summary.slice(0, 8), // First 8 for debugging
+          });
+        } catch (_) {}
+        return extractedStyling;
+      };
+      
+      // Helper to re-apply extracted styling to a line after replacement
+      // Uses TEXT-BASED MATCHING to find where styled content is in the new cells
+      const reapplyStylingToLine = (aceInstance, lineNum, cells, extractedStyling) => {
+        if (!extractedStyling || extractedStyling.length === 0) return;
+        let appliedCount = 0;
+        const appliedDetails = [];
+        
+        // Track successfully applied image positions per cell
+        // This allows subsequent image styles to reuse the same position
+        // (All image attributes belong to the same zero-width character)
+        const imagePositionsPerCell = {};
+        
+        // Log cells array for debugging position calculation
+        if (cells && cells.length > 0) {
+          const cellLens = cells.map((c, i) => `c${i}:${c?.length || 0}`).join(' ');
+          const fullLen = cells.reduce((sum, c) => sum + (c?.length || 0), 0) + (cells.length - 1);
+          console.debug('[ep_data_tables:reapplyStyling] cells', { lineNum, cellLens, fullLen, delimiters: cells.length - 1 });
+        }
+        try {
+          for (const style of extractedStyling) {
+            const originalCellIdx = style.cellIdx;
+            const styledText = style.text;
+            const originalRelStart = style.relStart;
+            
+            if (!styledText || styledText.length === 0) continue;
+            
+            const originalCellContent = cells[originalCellIdx] || '';
+            let foundCellIdx = -1;
+            let foundPos = -1;
+            let matchType = 'none';
+            
+            // STRATEGY: Use TEXT-BASED MATCHING for all cells
+            // This isolates each cell from position changes in other cells.
+            // For SHORT text that appears multiple times, use distance-from-end heuristic.
+            // For LONG text, simple indexOf works (unlikely to have duplicates).
+            
+            // Helper: Find position using distance-from-end heuristic for ambiguous text
+            const findWithOccurrenceHeuristic = (content, text, wasNearEnd) => {
+              const first = content.indexOf(text);
+              if (first === -1) return { pos: -1, type: 'not-found' };
+              
+              const second = content.indexOf(text, first + 1);
+              if (second === -1) {
+                // Unique occurrence
+                return { pos: first, type: 'unique' };
+              }
+              
+              // Multiple occurrences - choose based on original position
+              if (wasNearEnd) {
+                // Find last occurrence
+                let last = first;
+                let next = second;
+                while (next !== -1) {
+                  last = next;
+                  next = content.indexOf(text, last + 1);
+                }
+                return { pos: last, type: 'last' };
+              } else {
+                return { pos: first, type: 'first' };
+              }
+            };
+            
+            // Calculate if styled text was near the end of the original cell
+            const domCellLen = style.domCellLen || originalCellContent.length;
+            const distFromEnd = domCellLen - (originalRelStart + styledText.length);
+            const wasNearEnd = distFromEnd <= 2;
+            
+            // Step 1: For SHORT text (< 4 chars), use occurrence-aware matching FIRST
+            // This prevents indexOf from grabbing the wrong "22" in "222222222222"
+            if (styledText.length < 4 && originalCellContent.length > 0) {
+              const result = findWithOccurrenceHeuristic(originalCellContent, styledText, wasNearEnd);
+              if (result.pos !== -1) {
+                foundCellIdx = originalCellIdx;
+                foundPos = result.pos;
+                matchType = result.type === 'unique' ? 'unique-short' 
+                          : result.type === 'last' ? 'last-occurrence' 
+                          : 'first-occurrence';
+              }
+              
+              // If not found, try case-insensitive for short text too
+              if (foundCellIdx === -1) {
+                const lowerResult = findWithOccurrenceHeuristic(
+                  originalCellContent.toLowerCase(), 
+                  styledText.toLowerCase(), 
+                  wasNearEnd
+                );
+                if (lowerResult.pos !== -1) {
+                  foundCellIdx = originalCellIdx;
+                  foundPos = lowerResult.pos;
+                  matchType = 'case-insensitive-' + lowerResult.type;
+                }
+              }
+            }
+            
+            // Step 2: For LONG text (4+ chars), use simple indexOf (duplicates unlikely)
+            if (foundCellIdx === -1 && styledText.length >= 4 && originalCellContent) {
+              foundPos = originalCellContent.indexOf(styledText);
+              if (foundPos !== -1) {
+                foundCellIdx = originalCellIdx;
+                matchType = 'exact';
+              }
+              
+              // Try case-insensitive for long text (handles Grammarly edits)
+              if (foundCellIdx === -1) {
+                const lowerCell = originalCellContent.toLowerCase();
+                const lowerStyled = styledText.toLowerCase();
+                const lowerPos = lowerCell.indexOf(lowerStyled);
+                if (lowerPos !== -1) {
+                  foundCellIdx = originalCellIdx;
+                  foundPos = lowerPos;
+                  matchType = 'case-insensitive';
+                }
+              }
+            }
+            
+            // Step 3: If still not found, search all cells (content may have moved)
+            if (foundCellIdx === -1) {
+              for (let c = 0; c < cells.length; c++) {
+                if (c === originalCellIdx) continue; // Already tried
+                const cellContent = cells[c] || '';
+                foundPos = cellContent.indexOf(styledText);
+                if (foundPos !== -1) {
+                  foundCellIdx = c;
+                  matchType = 'other-cell';
+                  break;
+                }
+              }
+            }
+            
+            if (foundCellIdx === -1 || foundPos === -1) {
+              // Text not found - check if this is an image style
+              // For image styles, reuse a previously found position in the same cell
+              // (All image attributes belong to the same zero-width character)
+              const isZeroWidthText = /^[\u200B\u200C\u200D\uFEFF]+$/.test(styledText);
+              if (style.isImage || isZeroWidthText) {
+                // Try to reuse a previously found image position in this cell
+                if (imagePositionsPerCell[originalCellIdx] !== undefined) {
+                  foundCellIdx = originalCellIdx;
+                  foundPos = imagePositionsPerCell[originalCellIdx];
+                  matchType = 'image-reuse';
+                } else {
+                  // Find the first zero-width character in the cell
+                  const zwsMatch = originalCellContent.match(/[\u200B\u200C\u200D\uFEFF]/);
+                  if (zwsMatch) {
+                    foundCellIdx = originalCellIdx;
+                    foundPos = originalCellContent.indexOf(zwsMatch[0]);
+                    matchType = 'image-zws-fallback';
+                    // Cache this position for other image styles
+                    imagePositionsPerCell[originalCellIdx] = foundPos;
+                  }
+                }
+              }
+              
+              // If still not found, skip this styling
+              if (foundCellIdx === -1 || foundPos === -1) {
+                console.debug('[ep_data_tables:reapplyStyling] skipped', {
+                  originalCellIdx, text: styledText.slice(0, 10), reason: 'not-found',
+                  isImage: style.isImage, isZeroWidth: isZeroWidthText,
+                });
+                continue;
+              }
+            }
+            
+            // Validate position is within bounds
+            const foundCellContent = cells[foundCellIdx] || '';
+            if (foundPos + styledText.length > foundCellContent.length) {
+              console.debug('[ep_data_tables:reapplyStyling] skipped', {
+                foundCellIdx, text: styledText.slice(0, 10), reason: 'out-of-bounds',
+                foundPos, textLen: styledText.length, cellLen: foundCellContent.length,
+              });
+              continue;
+            }
+            
+            // Calculate absolute position using ONLY canonical cell lengths
+            // No DOM-based adjustments - each cell is independent!
+            let absStart = 0;
+            for (let c = 0; c < foundCellIdx; c++) {
+              absStart += (cells[c]?.length || 0) + DELIMITER.length;
+            }
+            absStart += foundPos;
+            
+            const absEnd = absStart + styledText.length;
+            
+            // Calculate total line length to ensure we don't exceed bounds
+            let totalLineLen = 0;
+            for (let c = 0; c < cells.length; c++) {
+              totalLineLen += (cells[c]?.length || 0);
+              if (c < cells.length - 1) totalLineLen += DELIMITER.length;
+            }
+            
+            // Skip if position would exceed line bounds - this can cause extra lines to be created
+            if (absEnd > totalLineLen) {
+              console.debug('[ep_data_tables:reapplyStyling] skipped', {
+                foundCellIdx, text: styledText.slice(0, 10), reason: 'exceeds-line-bounds',
+                absStart, absEnd, totalLineLen,
+              });
+              continue;
+            }
+            
+            // Apply the styling
+            if (style.attrs.length > 0) {
+              // Cache this position for image styles so other image attrs can reuse it
+              const isZeroWidthText = /^[\u200B\u200C\u200D\uFEFF]+$/.test(styledText);
+              if ((style.isImage || isZeroWidthText) && imagePositionsPerCell[foundCellIdx] === undefined) {
+                imagePositionsPerCell[foundCellIdx] = foundPos;
+              }
+              
+              // Enhanced logging to trace position calculation
+              const priorCellsDebug = [];
+              let priorSum = 0;
+              for (let c = 0; c < foundCellIdx; c++) {
+                const cellLen = (cells[c]?.length || 0);
+                priorCellsDebug.push(`c${c}:${cellLen}`);
+                priorSum += cellLen + DELIMITER.length;
+              }
+              console.debug('[ep_data_tables:reapplyStyling] applying', {
+                cell: foundCellIdx,
+                foundPos,
+                priorSum,
+                absStart,
+                absEnd,
+                text: styledText.slice(0, 10),
+                match: matchType,
+                priorCells: priorCellsDebug.join('+'),
+                attrs: style.attrs.map(a => `${a[0]}:${String(a[1]).slice(0,10)}`),
+              });
+              aceInstance.ace_performDocumentApplyAttributesToRange(
+                [lineNum, absStart],
+                [lineNum, absEnd],
+                style.attrs
+              );
+              appliedCount++;
+              appliedDetails.push({
+                cell: foundCellIdx,
+                pos: `${absStart}-${absEnd}`,
+                match: matchType,
+              });
+            }
+          }
+          if (appliedCount > 0) {
+            console.debug('[ep_data_tables:reapplyStyling] applied', {
+              lineNum, 
+              applied: appliedCount, 
+              total: extractedStyling.length,
+              details: appliedDetails,
+            });
+          }
+        } catch (err) {
+          console.debug('[ep_data_tables:reapplyStyling] error (non-fatal)', err?.message);
+        }
+      };
+
       const applyCanonicalCellsToLine = ({
         lineNum,
         sanitizedCells,
@@ -2142,6 +3170,7 @@ exports.aceInitialized = (h, ctx) => {
         evt,
         logTag,
         suppressInputCommit = false,
+        preCapturedStyling = null, // Optional: pre-captured styling from before collection
       }) => {
         const canonicalLine = sanitizedCells.join(DELIMITER);
         logCompositionEvent(`${logTag}-apply-start`, evt, {
@@ -2171,6 +3200,20 @@ exports.aceInitialized = (h, ctx) => {
               return;
             }
 
+            // Use pre-captured styling if available (from before collection), 
+            // otherwise try to extract from current DOM (may be stale)
+            let extractedStyling = preCapturedStyling;
+            if (!extractedStyling || extractedStyling.length === 0) {
+              extractedStyling = extractStylingFromLineDOM(lineEntryBefore.lineNode);
+            }
+            if (extractedStyling && extractedStyling.length > 0) {
+              console.debug('[ep_data_tables:applyCanonicalCellsToLine] using styling', {
+                lineNum, count: extractedStyling.length,
+                source: preCapturedStyling ? 'pre-captured' : 'lineEntry',
+                sample: extractedStyling.slice(0, 2).map(s => ({ cell: s.cellIdx, attrs: s.attrs })),
+              });
+            }
+
             const existingLength = lineEntryBefore.text.length;
             try {
               aceInstance.ace_performDocumentReplaceRange([lineNum, 0], [lineNum, existingLength], canonicalLine);
@@ -2196,6 +3239,9 @@ exports.aceInitialized = (h, ctx) => {
               offset += cellText.length;
               if (i < sanitizedCells.length - 1) offset += DELIMITER.length;
             }
+            
+            // Re-apply extracted styling after cell attributes
+            reapplyStylingToLine(aceInstance, lineNum, sanitizedCells, extractedStyling);
 
             const repAfter = aceInstance.ace_getRep();
             ed.ep_data_tables_applyMeta(lineNum, tableMetadata.tblId, tableMetadata.row, tableMetadata.cols, repAfter, ed, null, docManager);
@@ -2441,17 +3487,91 @@ exports.aceInitialized = (h, ctx) => {
         if (evt && !evt._epDataTablesHandled) evt._epDataTablesHandled = true;
         if (nativeEvt && !nativeEvt._epDataTablesHandled) nativeEvt._epDataTablesHandled = true;
 
-        const rep = ed.ace_getRep();
-        if (!rep || !rep.selStart) return;
-        const lineNum = rep.selStart[0];
+        // CRITICAL: Capture styling from DOM BEFORE any rep access or collection
+        // After ace_getRep(), collection may run and wipe styling
+        let preCapturedStyling = null;
+        let preCapturedLineNum = -1;
+        try {
+          const innerDoc = ed.ep_data_tables_innerDoc || 
+                          (typeof $inner !== 'undefined' && $inner[0]?.ownerDocument) || 
+                          document;
+          // Get current selection to determine line number before collection
+          const sel = innerDoc.defaultView?.getSelection?.() || window.getSelection?.();
+          if (sel && sel.anchorNode) {
+            const aceLine = sel.anchorNode.nodeType === 1 
+              ? sel.anchorNode.closest?.('div.ace-line')
+              : sel.anchorNode.parentElement?.closest?.('div.ace-line');
+            if (aceLine) {
+              const allAceLines = innerDoc.querySelectorAll('div.ace-line');
+              for (let i = 0; i < allAceLines.length; i++) {
+                if (allAceLines[i] === aceLine) {
+                  preCapturedLineNum = i;
+                  preCapturedStyling = extractStylingFromLineDOM(aceLine);
+                  if (preCapturedStyling.length > 0) {
+                    // Log detailed info about what was captured
+                    console.debug('[ep_data_tables:handleDesktopCommitInput] pre-captured styling', {
+                      lineNum: i, 
+                      count: preCapturedStyling.length,
+                      details: preCapturedStyling.map(s => ({
+                        cell: s.cellIdx,
+                        text: s.text.slice(0, 20),
+                        attrs: s.attrs.map(a => a[0]).join(','),
+                      })),
+                    });
+                  }
+                  break;
+                }
+              }
+            }
+          }
+        } catch (preCapErr) {
+          console.debug('[ep_data_tables:handleDesktopCommitInput] pre-capture failed', preCapErr?.message);
+        }
+        
+        // Always log pre-capture result for debugging
+        console.debug('[ep_data_tables:handleDesktopCommitInput] pre-capture result', {
+          lineNum: preCapturedLineNum,
+          stylingCount: preCapturedStyling?.length || 0,
+          hasTable: preCapturedLineNum >= 0,
+        });
 
-        const tableMetadata = getTableMetadataForLine(lineNum);
-        if (!tableMetadata) return;
+        const rep = ed.ace_getRep();
+        if (!rep || !rep.selStart) {
+          console.debug('[ep_data_tables:handleDesktopCommitInput] early-exit: no rep or selStart');
+          return;
+        }
+        let lineNum = rep.selStart[0];
+
+        let tableMetadata = getTableMetadataForLine(lineNum);
+        
+        // If table metadata not found on current line, try pre-captured line
+        // This handles cases where collection shifted line numbers
+        if (!tableMetadata && preCapturedLineNum >= 0 && preCapturedLineNum !== lineNum) {
+          console.debug('[ep_data_tables:handleDesktopCommitInput] trying pre-captured line', {
+            currentLine: lineNum, preCapturedLine: preCapturedLineNum,
+          });
+          tableMetadata = getTableMetadataForLine(preCapturedLineNum);
+          if (tableMetadata) {
+            lineNum = preCapturedLineNum; // Use pre-captured line
+          }
+        }
+        
+        if (!tableMetadata) {
+          console.debug('[ep_data_tables:handleDesktopCommitInput] early-exit: no table metadata', {
+            lineNum, preCapturedLineNum, hasPreCapturedStyling: !!preCapturedStyling,
+          });
+          return;
+        }
 
         const lineEntry = rep.lines.atIndex(lineNum);
         let sanitizedCells = collectSanitizedCells(lineEntry, tableMetadata, 'input-commit');
         const currentLineText = lineEntry?.text || '';
         let canonicalLine = sanitizedCells.join(DELIMITER);
+        
+        // Use pre-captured styling if available (line match check removed - we've already resolved lineNum)
+        const usablePreCapturedStyling = (preCapturedStyling && preCapturedStyling.length > 0)
+          ? preCapturedStyling
+          : null;
 
         const resolveTargetCellIndex = (cells) => {
           let idx = computeTargetCellIndexFromSelection(rep.selStart[1], cells);
@@ -2483,6 +3603,7 @@ exports.aceInitialized = (h, ctx) => {
             evt,
             logTag: `${reasonTag}-apply`,
             suppressInputCommit: true,
+            preCapturedStyling: usablePreCapturedStyling, // Pass pre-captured styling
           });
         };
 
@@ -2508,7 +3629,80 @@ exports.aceInitialized = (h, ctx) => {
             });
             return;
           }
-          logCompositionEvent('input-commit-skip-canonical', evt, { lineNum });
+          
+          // Even when text matches, styling may have been lost during collection
+          // Use PRE-CAPTURED styling from BEFORE collection ran (not stale lineEntry.lineNode)
+          try {
+            if (usablePreCapturedStyling && usablePreCapturedStyling.length > 0) {
+              // CRITICAL: Get fresh line text INSIDE ace_callWithAce
+              // The lineEntry.text we have is from BEFORE collection updated the document.
+              // We need to re-read the line to get the actual content after collection.
+              ed.ace_callWithAce((aceInstance) => {
+                const freshRep = aceInstance.ace_getRep();
+                const freshLineEntry = freshRep.lines.atIndex(lineNum);
+                const freshLineText = freshLineEntry?.text || '';
+                const actualCells = freshLineText.split(DELIMITER);
+                reapplyStylingToLine(aceInstance, lineNum, actualCells, usablePreCapturedStyling);
+                
+                // Clean up any blank lines that may have been created after this table row
+                // This can happen with Grammarly and other extensions
+                try {
+                  const repAfter = aceInstance.ace_getRep();
+                  if (repAfter && repAfter.lines) {
+                    const totalLines = repAfter.lines.length();
+                    const blankLinesToRemove = [];
+                    
+                    // Scan for blank lines immediately after this row
+                    for (let li = lineNum + 1; li < totalLines && li < lineNum + 10; li++) {
+                      const checkEntry = repAfter.lines.atIndex(li);
+                      const checkText = checkEntry?.text || '';
+                      
+                      // Stop at next table row
+                      const isTableRow = docManager && typeof docManager.getAttributeOnLine === 'function'
+                        && docManager.getAttributeOnLine(li, ATTR_TABLE_JSON);
+                      if (isTableRow) break;
+                      
+                      // Check if blank (empty or just whitespace)
+                      if (!checkText.trim() || checkText === '\n') {
+                        blankLinesToRemove.push(li);
+                      } else {
+                        break; // Stop at first non-blank, non-table line
+                      }
+                    }
+                    
+                    // Remove blank lines bottom-up to preserve line numbers
+                    if (blankLinesToRemove.length > 0) {
+                      console.debug('[ep_data_tables:input-commit] cleaning up blank lines', {
+                        lineNum, blankLines: blankLinesToRemove,
+                      });
+                      blankLinesToRemove.sort((a, b) => b - a).forEach((blankLineNum) => {
+                        try {
+                          const checkRep = aceInstance.ace_getRep();
+                          if (checkRep && blankLineNum < checkRep.lines.length()) {
+                            aceInstance.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
+                          }
+                        } catch (_) {}
+                      });
+                    }
+                  }
+                } catch (cleanupErr) {
+                  console.debug('[ep_data_tables:input-commit] blank line cleanup error (non-fatal)', cleanupErr?.message);
+                }
+              }, 'ep_data_tables:input-commit-restore-styling', true);
+              logCompositionEvent('input-commit-restored-styling', evt, { 
+                lineNum, 
+                styleCount: usablePreCapturedStyling.length,
+                source: 'pre-captured',
+              });
+            } else {
+              logCompositionEvent('input-commit-skip-canonical', evt, { 
+                lineNum, 
+                reason: 'no-pre-captured-styling',
+              });
+            }
+          } catch (styleErr) {
+            logCompositionEvent('input-commit-skip-canonical', evt, { lineNum, styleError: styleErr?.message });
+          }
           return;
         }
 
@@ -2549,37 +3743,151 @@ exports.aceInitialized = (h, ctx) => {
           if (rep0 && rep0.selStart) {
             let lineNum = rep0.selStart[0];
             let cellIndex = -1;
+            let tableMetadata = null;
+            let cellSnapshot = null;
+            let originalTableLine = null; // Track where the table actually is
+            
             try {
-              const tableMetadata = getTableMetadataForLine(lineNum);
-              if (tableMetadata && typeof tableMetadata.cols === 'number') {
-                const entry = rep0.lines.atIndex(lineNum);
-                // Try DOM-based mapping first for highest fidelity.
-                const domTarget = getDomCellTargetFromSelection();
-                if (domTarget) {
-                  if (typeof domTarget.lineNum === 'number') lineNum = domTarget.lineNum;
-                  if (typeof domTarget.idx === 'number' && domTarget.idx >= 0) cellIndex = domTarget.idx;
+              // CRITICAL: First, try to find the table from DOM selection
+              // This works even if the rep line number is wrong
+              const domTarget = getDomCellTargetFromSelection();
+              const domFoundTable = !!(domTarget && domTarget.tblId); // Track if DOM says we're in a table
+              
+              if (domFoundTable) {
+                // Found a table from DOM selection - use its line number if available
+                if (typeof domTarget.lineNum === 'number' && domTarget.lineNum >= 0) {
+                  originalTableLine = domTarget.lineNum;
+                  console.debug('[ep_data_tables:compositionstart] DOM selection found table', {
+                    selLine: lineNum, domLine: domTarget.lineNum, tblId: domTarget.tblId, cellIdx: domTarget.idx,
+                  });
+                  // Use DOM-derived line number for metadata lookup
+                  lineNum = domTarget.lineNum;
+                  if (typeof domTarget.idx === 'number' && domTarget.idx >= 0) {
+                    cellIndex = domTarget.idx;
+                  }
                 }
+              }
+              
+              tableMetadata = getTableMetadataForLine(lineNum);
+              
+              // DOM fallback: if metadata not found via attribute, try extracting from table element
+              if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
+                try {
+                  const entry = rep0.lines.atIndex(lineNum);
+                  const lineNode = entry?.lineNode;
+                  if (lineNode) {
+                    const tableEl = lineNode.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]');
+                    if (tableEl) {
+                      const domTblId = tableEl.getAttribute('data-tblId') || tableEl.getAttribute('data-tblid');
+                      const domRow = parseInt(tableEl.getAttribute('data-row') || '0', 10);
+                      const tr = tableEl.querySelector('tbody > tr');
+                      const domCols = tr ? tr.children.length : 0;
+                      if (domTblId && domCols > 0) {
+                        tableMetadata = { tblId: domTblId, row: domRow, cols: domCols };
+                        originalTableLine = lineNum;
+                        console.debug('[ep_data_tables:compositionstart] recovered metadata from DOM element', {
+                          lineNum, tblId: domTblId, row: domRow, cols: domCols,
+                        });
+                      }
+                    }
+                  }
+                } catch (domMetaErr) {
+                  console.debug('[ep_data_tables:compositionstart] DOM metadata extraction failed', domMetaErr);
+                }
+              } else {
+                originalTableLine = lineNum;
+              }
+              
+              // NOTE: Nearby line scanning REMOVED - it was causing false positives
+              // The previous logic would scan ±3 lines for tables even when NOT editing in a table,
+              // which caused corruption when typing near (but not inside) a table.
+              // 
+              // If DOM selection indicates we're in a table (domFoundTable=true) but we couldn't
+              // get metadata, that's a different issue that should be investigated separately.
+              if (!tableMetadata && domFoundTable) {
+                console.debug('[ep_data_tables:compositionstart] DOM found table but no metadata - unusual state', {
+                  selLine: rep0.selStart[0], domLine: domTarget?.lineNum, tblId: domTarget?.tblId,
+                });
+              }
+              
+              if (tableMetadata && typeof tableMetadata.cols === 'number') {
+                const entry = rep0.lines.atIndex(originalTableLine ?? lineNum);
                 if (cellIndex < 0) {
                   // Fall back to RAW mapping to avoid normalization drift.
                   const rawMap = computeTargetCellIndexFromRaw(entry, rep0.selStart[1]);
                   cellIndex = rawMap.index;
                 }
+                // Capture snapshot of cell contents for corruption recovery
+                // Try DOM-based cell extraction for higher fidelity
+                if (entry && tableMetadata.cols > 0) {
+                  const lineNode = entry?.lineNode;
+                  const tableEl = lineNode?.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]');
+                  if (tableEl) {
+                    const tr = tableEl.querySelector('tbody > tr');
+                    if (tr && tr.children.length === tableMetadata.cols) {
+                      cellSnapshot = new Array(tableMetadata.cols);
+                      for (let i = 0; i < tableMetadata.cols; i++) {
+                        const td = tr.children[i];
+                        cellSnapshot[i] = sanitizeCellContent(td?.innerText || ' ');
+                      }
+                      console.debug('[ep_data_tables:compositionstart] snapshot captured from DOM', {
+                        lineNum: originalTableLine ?? lineNum, cellIndex, cellSnapshot, tblId: tableMetadata.tblId,
+                      });
+                    }
+                  }
+                  // Fallback to text-based snapshot if DOM extraction failed
+                  if (!cellSnapshot) {
+                    const lineText = entry.text || '';
+                    const cells = lineText.split(DELIMITER);
+                    cellSnapshot = new Array(tableMetadata.cols);
+                    for (let i = 0; i < tableMetadata.cols; i++) {
+                      cellSnapshot[i] = sanitizeCellContent(cells[i] || ' ');
+                    }
+                    console.debug('[ep_data_tables:compositionstart] snapshot captured from text', {
+                      lineNum: originalTableLine ?? lineNum, cellIndex, cellSnapshot, tblId: tableMetadata.tblId,
+                    });
+                  }
+                }
               }
-            } catch (_) {}
+            } catch (metaErr) {
+              console.debug('[ep_data_tables:compositionstart] metadata capture error', metaErr);
+            }
             desktopComposition = {
               active: true,
               start: rep0.selStart.slice(),
               end: rep0.selEnd ? rep0.selEnd.slice() : rep0.selStart.slice(),
               lineNum,
               cellIndex,
-              tblId: (() => {
-                const domTarget = getDomCellTargetFromSelection();
-                return domTarget && domTarget.tblId ? domTarget.tblId : null;
-              })(),
+              tblId: tableMetadata?.tblId ?? null,
+              // Snapshot for corruption recovery
+              snapshot: cellSnapshot,
+              snapshotMeta: tableMetadata ? { ...tableMetadata } : null,
+              // CRITICAL: Track the original table line for recovery
+              originalTableLine: originalTableLine,
             };
+            
+            // CRITICAL: Set module-level variable for postWriteCanonicalize to access
+            // This tells the canonicalizer where the table SHOULD be, not where the attribute ended up
+            if (tableMetadata?.tblId && originalTableLine !== null) {
+              __epDT_compositionOriginalLine = {
+                tblId: tableMetadata.tblId,
+                lineNum: originalTableLine,
+                timestamp: Date.now(),
+              };
+            }
+            
+            // Log final state for debugging
+            console.debug('[ep_data_tables:compositionstart] state captured', {
+              selStart: rep0.selStart, lineNum, cellIndex,
+              tblId: desktopComposition.tblId,
+              originalTableLine,
+              hasSnapshot: !!cellSnapshot,
+              hasMeta: !!tableMetadata,
+            });
           }
-        } catch (_) {
-          desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
+        } catch (err) {
+          console.debug('[ep_data_tables:compositionstart] error', err);
+          desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1, snapshot: null, snapshotMeta: null, originalTableLine: null };
         }
       });
 
@@ -2950,10 +4258,26 @@ exports.aceInitialized = (h, ctx) => {
           el.setAttribute('autocomplete', 'off');
           el.setAttribute('autocapitalize', 'off');
           el.setAttribute('spellcheck', 'false');
-          el.setAttribute('data-gramm', 'false');
-          el.setAttribute('data-enable-grammarly', 'false');
+          // TEMPORARILY DISABLED FOR TESTING - uncomment to re-enable Grammarly blocking
+          // el.setAttribute('data-gramm', 'false');
+          // el.setAttribute('data-enable-grammarly', 'false');
         };
         disableAuto(innerDocBody[0] || innerDocBody);
+        
+        // TEMPORARILY DISABLED FOR TESTING - uncomment to re-enable Grammarly blocking on iframes
+        // Also disable on the iframes themselves (Grammarly checks these too)
+        // try {
+        //   const outerFrame = document.querySelector('iframe[name="ace_outer"]');
+        //   const innerFrame = outerFrame?.contentDocument?.querySelector('iframe[name="ace_inner"]');
+        //   if (outerFrame) {
+        //     outerFrame.setAttribute('data-gramm', 'false');
+        //     outerFrame.setAttribute('data-enable-grammarly', 'false');
+        //   }
+        //   if (innerFrame) {
+        //     innerFrame.setAttribute('data-gramm', 'false');
+        //     innerFrame.setAttribute('data-enable-grammarly', 'false');
+        //   }
+        // } catch (_) {}
       } catch (_) {}
       
       if (!$inner || $inner.length === 0) {
@@ -4073,6 +5397,22 @@ exports.aceInitialized = (h, ctx) => {
       requestAnimationFrame(() => {
         try {
           ed.ace_callWithAce((aceInstance) => {
+            // CRITICAL GUARD: Only run table-related pipeline if we're actually editing a table
+            // Check if compositionstart found a table (snapshotMeta set) or if DOM selection is in a table
+            const domTargetCheck = getDomCellTargetFromSelection();
+            const domIsInTable = !!(domTargetCheck && domTargetCheck.tblId);
+            const compositionFoundTable = !!(desktopComposition && desktopComposition.snapshotMeta);
+            
+            if (!compositionFoundTable && !domIsInTable) {
+              // User is NOT editing in a table - let normal Etherpad handle this
+              logCompositionEvent('compositionend-desktop-skipped-not-in-table', evt, {
+                compositionFoundTable,
+                domIsInTable,
+                lineNum: desktopComposition?.lineNum,
+              });
+              return;
+            }
+            
             // Pipeline: Apply committed IME string synchronously to the target cell
             const commitStrRaw = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
             const commitStr = sanitizeCellContent(commitStrRaw || '');
@@ -4131,6 +5471,75 @@ exports.aceInitialized = (h, ctx) => {
                 }
               } catch (_) {}
             }
+            
+            // ENHANCED FALLBACK: If compositionstart missed metadata, try multiple recovery strategies
+            if (!metadata || typeof metadata.cols !== 'number') {
+              // Strategy 1: Use DOM selection to find the table we're actually in
+              try {
+                const domTarget = getDomCellTargetFromSelection();
+                if (domTarget && domTarget.tblId && typeof domTarget.lineNum === 'number') {
+                  const targetEntry = repNow.lines.atIndex(domTarget.lineNum);
+                  if (targetEntry) {
+                    const tableNode = targetEntry.lineNode?.querySelector(
+                      `table.dataTable[data-tblId="${domTarget.tblId}"], table.dataTable[data-tblid="${domTarget.tblId}"]`
+                    );
+                    if (tableNode) {
+                      const tr = tableNode.querySelector('tbody > tr');
+                      const domCols = tr ? tr.children.length : 0;
+                      if (domCols > 0) {
+                        metadata = {
+                          tblId: domTarget.tblId,
+                          row: parseInt(tableNode.getAttribute('data-row') || '0', 10),
+                          cols: domCols,
+                        };
+                        entry = targetEntry;
+                        logCompositionEvent('compositionend-desktop-selection-fallback', evt, {
+                          originalLine: pipelineLineNum,
+                          recoveredLine: domTarget.lineNum,
+                          tblId: metadata.tblId,
+                          cols: metadata.cols,
+                        });
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+            
+            // Strategy 2: Use last_clicked state if available
+            if ((!metadata || typeof metadata.cols !== 'number') && ed.ep_data_tables_last_clicked) {
+              try {
+                const lastClicked = ed.ep_data_tables_last_clicked;
+                if (lastClicked.tblId && typeof lastClicked.lineNum === 'number') {
+                  const targetEntry = repNow.lines.atIndex(lastClicked.lineNum);
+                  if (targetEntry) {
+                    const tableNode = targetEntry.lineNode?.querySelector(
+                      `table.dataTable[data-tblId="${lastClicked.tblId}"], table.dataTable[data-tblid="${lastClicked.tblId}"]`
+                    );
+                    if (tableNode) {
+                      const tr = tableNode.querySelector('tbody > tr');
+                      const domCols = tr ? tr.children.length : 0;
+                      if (domCols > 0) {
+                        metadata = {
+                          tblId: lastClicked.tblId,
+                          row: parseInt(tableNode.getAttribute('data-row') || '0', 10),
+                          cols: domCols,
+                        };
+                        entry = targetEntry;
+                        logCompositionEvent('compositionend-desktop-lastclicked-fallback', evt, {
+                          originalLine: pipelineLineNum,
+                          recoveredLine: lastClicked.lineNum,
+                          tblId: metadata.tblId,
+                          cols: metadata.cols,
+                          cellIndex: lastClicked.cellIndex,
+                        });
+                      }
+                    }
+                  }
+                }
+              } catch (_) {}
+            }
+            
             if (!metadata || typeof metadata.cols !== 'number') {
               logCompositionEvent('compositionend-desktop-no-meta', evt, { lineNum: pipelineLineNum });
               return;
@@ -4167,7 +5576,327 @@ exports.aceInitialized = (h, ctx) => {
                     logTag: 'compositionend-desktop-pipeline-minimal',
                 aceInstance,
               });
-            desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1 };
+
+            // Post-composition orphan detection and repair using snapshot
+            // This handles cases where the composition caused line fragmentation
+            setTimeout(() => {
+              // CRITICAL: Pre-check editor state before calling ace_callWithAce
+              // The ace_callWithAce itself can crash if Etherpad's internal state is corrupted
+              // (keyToNodeMap.get(...) is undefined error)
+              try {
+                const preCheckRep = ed.ace_getRep && ed.ace_getRep();
+                if (!preCheckRep || !preCheckRep.lines) {
+                  console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - rep unavailable in pre-check');
+                  return;
+                }
+                // Additional sanity check - verify we can access line count without error
+                const preCheckLineCount = preCheckRep.lines.length();
+                if (typeof preCheckLineCount !== 'number' || preCheckLineCount < 1) {
+                  console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - invalid line count in pre-check');
+                  return;
+                }
+              } catch (preCheckErr) {
+                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - pre-check failed', preCheckErr?.message);
+                return;
+              }
+              
+              // Wrap entire ace_callWithAce in try-catch to handle internal Etherpad errors
+              try {
+                ed.ace_callWithAce((ace2) => {
+                  try {
+                  const repPost = ace2.ace_getRep();
+                  if (!repPost || !repPost.lines || !docManager) return;
+                  
+                  const snapshotMeta = desktopComposition.snapshotMeta;
+                  const snapshotCells = desktopComposition.snapshot;
+                  const targetTblId = snapshotMeta?.tblId || metadata?.tblId;
+                  const targetRow = snapshotMeta?.row ?? metadata?.row ?? 0;
+                  
+                  if (!targetTblId) return;
+                  
+                  // Find all lines with the same tblId/row (attribute-based AND DOM-based detection)
+                  const matchingLines = [];
+                  const seenLines = new Set();
+                  const totalLines = repPost.lines.length();
+                  for (let li = 0; li < totalLines; li++) {
+                    // Method 1: Check line attribute
+                    let attrStr = null;
+                    try { attrStr = docManager.getAttributeOnLine(li, ATTR_TABLE_JSON); } catch (_) {}
+                    if (attrStr) {
+                      try {
+                        const m = JSON.parse(attrStr);
+                        if (m && m.tblId === targetTblId && m.row === targetRow) {
+                          const entry = repPost.lines.atIndex(li);
+                          matchingLines.push({ lineNum: li, text: entry?.text || '', meta: m, source: 'attr' });
+                          seenLines.add(li);
+                        }
+                      } catch (_) {}
+                    }
+                    
+                    // Method 2: DOM-based detection - find lines with tbljson-* OR tblCell-* class but no table
+                    // NOTE: Browser may strip tbljson-* during IME but keep tblCell-*, so check both!
+                    if (seenLines.has(li)) continue;
+                    try {
+                      const lineEntry = repPost.lines.atIndex(li);
+                      const lineNode = lineEntry?.lineNode;
+                      if (lineNode) {
+                        const hasTable = lineNode.querySelector('table.dataTable');
+                        if (!hasTable) {
+                          // Check for tbljson-* spans (can decode metadata)
+                          const tbljsonSpan = lineNode.querySelector('[class*="tbljson-"]');
+                          if (tbljsonSpan) {
+                            for (const cls of tbljsonSpan.classList) {
+                              if (cls.startsWith('tbljson-')) {
+                                try {
+                                  const decoded = JSON.parse(atob(cls.substring(8)));
+                                  if (decoded && decoded.tblId === targetTblId && decoded.row === targetRow) {
+                                    const orphanText = lineEntry?.text || '';
+                                    matchingLines.push({
+                                      lineNum: li,
+                                      text: orphanText,
+                                      meta: decoded,
+                                      source: 'dom-class-tbljson',
+                                    });
+                                    seenLines.add(li);
+                                    console.debug('[ep_data_tables:compositionend-orphan-repair] tbljson DOM orphan found', {
+                                      lineNum: li, tblId: decoded.tblId, row: decoded.row,
+                                    });
+                                    break;
+                                  }
+                                } catch (_) {}
+                              }
+                            }
+                          }
+                          
+                          // Also check for tblCell-* spans (no encoded metadata, assume it's our target)
+                          // This catches orphans where browser stripped tbljson-* but kept tblCell-*
+                          if (!seenLines.has(li)) {
+                            const tblCellSpan = lineNode.querySelector('[class*="tblCell-"]');
+                            if (tblCellSpan) {
+                              const orphanText = lineEntry?.text || '';
+                              // Only add if the text contains delimiters (suggests table-related content)
+                              if (orphanText.includes(DELIMITER) || orphanText.trim().length > 0) {
+                                matchingLines.push({
+                                  lineNum: li,
+                                  text: orphanText,
+                                  meta: { tblId: targetTblId, row: targetRow, cols: metadata?.cols || 3 },
+                                  source: 'dom-class-tblCell',
+                                });
+                                seenLines.add(li);
+                                console.debug('[ep_data_tables:compositionend-orphan-repair] tblCell DOM orphan found', {
+                                  lineNum: li, targetTblId, targetRow, textLen: orphanText.length,
+                                });
+                              }
+                            }
+                          }
+                        }
+                      }
+                    } catch (_) {}
+                  }
+                  
+                  // If more than one line matches, we have orphans - need to merge
+                  if (matchingLines.length > 1) {
+                    console.warn('[ep_data_tables:compositionend-orphan-repair] detected orphan lines', {
+                      targetTblId, targetRow, lineCount: matchingLines.length,
+                      lines: matchingLines.map(l => ({ line: l.lineNum, textLen: l.text.length })),
+                      hasSnapshot: !!snapshotCells,
+                    });
+                    
+                    // CRITICAL: Find the primary line using LIVE DOM query
+                    // The lineNode references from rep.lines might be stale - query the actual DOM
+                    let primaryLine = null;
+                    let orphans = [];
+                    let lineWithTableIdx = -1;
+                    
+                    // Use live DOM query to find which ace-line actually has our table
+                    try {
+                      const innerDoc = $inner[0]?.ownerDocument || document;
+                      const editorBody = innerDoc.getElementById('innerdocbody') || innerDoc.body;
+                      if (editorBody) {
+                        const allAceLines = editorBody.querySelectorAll('div.ace-line');
+                        for (let ai = 0; ai < allAceLines.length; ai++) {
+                          const aceLine = allAceLines[ai];
+                          const tableEl = aceLine.querySelector(
+                            `table.dataTable[data-tblId="${targetTblId}"][data-row="${targetRow}"], ` +
+                            `table.dataTable[data-tblid="${targetTblId}"][data-row="${targetRow}"]`
+                          );
+                          if (tableEl) {
+                            lineWithTableIdx = ai;
+                            console.debug('[ep_data_tables:compositionend-orphan-repair] LIVE DOM found table', {
+                              domIndex: ai, aceLineId: aceLine.id,
+                            });
+                            break;
+                          }
+                        }
+                      }
+                    } catch (domQueryErr) {
+                      console.error('[ep_data_tables:compositionend-orphan-repair] live DOM query error', domQueryErr);
+                    }
+                    
+                    // Find the primary line: prefer the one with the table, else lowest line number
+                    if (lineWithTableIdx >= 0) {
+                      // Find matching line for this DOM index
+                      primaryLine = matchingLines.find(ml => ml.lineNum === lineWithTableIdx);
+                      if (primaryLine) {
+                        orphans = matchingLines.filter(ml => ml.lineNum !== lineWithTableIdx);
+                        console.debug('[ep_data_tables:compositionend-orphan-repair] primary set via live DOM', {
+                          lineNum: primaryLine.lineNum,
+                        });
+                      }
+                    }
+                    
+                    // Fallback: if no line has a table, use the lowest line number
+                    if (!primaryLine) {
+                      matchingLines.sort((a, b) => a.lineNum - b.lineNum);
+                      primaryLine = matchingLines[0];
+                      orphans = matchingLines.slice(1);
+                      console.debug('[ep_data_tables:compositionend-orphan-repair] no table DOM found, using lowest line', {
+                        lineNum: primaryLine.lineNum,
+                      });
+                    }
+                    
+                    const expectedCols = primaryLine.meta.cols || (snapshotMeta?.cols) || 3;
+                    
+                    // Start with snapshot cells if available, otherwise use primary line
+                    const baseCells = snapshotCells ? snapshotCells.slice() : primaryLine.text.split(DELIMITER);
+                    while (baseCells.length < expectedCols) baseCells.push(' ');
+                    
+                    // If we have a valid committed string and cell index, apply it to the base
+                    if (commitStr && commitStr.trim() && idx >= 0 && idx < expectedCols) {
+                      // The committed text should be in the target cell
+                      // Check if it's already there
+                      if (!baseCells[idx].includes(commitStr.trim())) {
+                        baseCells[idx] = sanitizeCellContent(baseCells[idx].trim() + commitStr.trim()) || ' ';
+                      }
+                    }
+                    
+                    // Merge content from orphan lines (preserve data, never delete content)
+                    for (const orphan of orphans) {
+                      const orphanSegs = orphan.text.split(DELIMITER);
+                      for (let ci = 0; ci < Math.min(orphanSegs.length, expectedCols); ci++) {
+                        const orphanContent = sanitizeCellContent(orphanSegs[ci] || '');
+                        if (!orphanContent || orphanContent.trim() === '') continue;
+                        // If base cell doesn't already contain this content, merge it
+                        const baseTrimmed = (baseCells[ci] || '').trim();
+                        const orphanTrimmed = orphanContent.trim();
+                        if (baseTrimmed.includes(orphanTrimmed)) continue;
+                        if (!baseTrimmed) {
+                          baseCells[ci] = orphanContent;
+                        } else {
+                          baseCells[ci] = baseTrimmed + orphanTrimmed;
+                        }
+                      }
+                    }
+                    
+                    // Sanitize all cells
+                    for (let ci = 0; ci < expectedCols; ci++) {
+                      baseCells[ci] = sanitizeCellContent(baseCells[ci] || ' ');
+                    }
+                    
+                    const mergedText = baseCells.join(DELIMITER);
+                    
+                    // Update primary line with merged content
+                    const currentPrimaryText = repPost.lines.atIndex(primaryLine.lineNum)?.text || '';
+                    if (mergedText !== currentPrimaryText) {
+                      console.debug('[ep_data_tables:compositionend-orphan-repair] applying merged text', {
+                        primaryLine: primaryLine.lineNum, from: currentPrimaryText.length, to: mergedText.length,
+                      });
+                      ace2.ace_performDocumentReplaceRange(
+                        [primaryLine.lineNum, 0],
+                        [primaryLine.lineNum, currentPrimaryText.length],
+                        mergedText
+                      );
+                      
+                      // Re-apply cell attributes
+                      let offset = 0;
+                      for (let ci = 0; ci < baseCells.length; ci++) {
+                        const cellLen = baseCells[ci].length;
+                        if (cellLen > 0) {
+                          ace2.ace_performDocumentApplyAttributesToRange(
+                            [primaryLine.lineNum, offset],
+                            [primaryLine.lineNum, offset + cellLen],
+                            [[ATTR_CELL, String(ci)]]
+                          );
+                        }
+                        offset += cellLen;
+                        if (ci < baseCells.length - 1) offset += DELIMITER.length;
+                      }
+                    }
+                    
+                    // Delete orphan lines (bottom-up to preserve line numbers)
+                    // Content has already been merged, so this is safe
+                    // CRITICAL: Wrap each operation in try-catch to prevent cascade failures
+                    orphans.sort((a, b) => b.lineNum - a.lineNum);
+                    let orphansRemoved = 0;
+                    for (const orphan of orphans) {
+                      try {
+                        // Re-fetch rep to get current line count (may have changed after previous deletions)
+                        const repCheck = ace2.ace_getRep();
+                        if (!repCheck || !repCheck.lines) {
+                          console.warn('[ep_data_tables:compositionend-orphan-repair] rep invalid, aborting', { orphan: orphan.lineNum });
+                          break;
+                        }
+                        const currentLineCount = repCheck.lines.length();
+                        if (orphan.lineNum >= currentLineCount) {
+                          console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan - line no longer exists', {
+                            orphanLine: orphan.lineNum, currentLineCount,
+                          });
+                          continue;
+                        }
+                        // Verify the line entry exists before operating on it
+                        const orphanEntry = repCheck.lines.atIndex(orphan.lineNum);
+                        if (!orphanEntry) {
+                          console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan - no entry', {
+                            orphanLine: orphan.lineNum,
+                          });
+                          continue;
+                        }
+                        
+                      try {
+                        if (docManager && typeof docManager.removeAttributeOnLine === 'function') {
+                          docManager.removeAttributeOnLine(orphan.lineNum, ATTR_TABLE_JSON);
+                        }
+                        } catch (attrErr) {
+                          console.debug('[ep_data_tables:compositionend-orphan-repair] removeAttribute failed', attrErr);
+                        }
+                        
+                      console.debug('[ep_data_tables:compositionend-orphan-repair] removing orphan (merged)', {
+                        orphanLine: orphan.lineNum,
+                      });
+                      ace2.ace_performDocumentReplaceRange([orphan.lineNum, 0], [orphan.lineNum + 1, 0], '');
+                        orphansRemoved++;
+                      } catch (orphanDeleteErr) {
+                        console.error('[ep_data_tables:compositionend-orphan-repair] error deleting orphan line', {
+                          orphanLine: orphan.lineNum,
+                          error: orphanDeleteErr?.message || orphanDeleteErr,
+                        });
+                        // Don't break - try to continue with remaining orphans
+                      }
+                    }
+                    try { ace2.ace_fastIncorp(5); } catch (incErr) {
+                      console.debug('[ep_data_tables:compositionend-orphan-repair] fastIncorp error (non-fatal)', incErr?.message);
+                    }
+                    console.debug('[ep_data_tables:compositionend-orphan-repair] repair complete', {
+                      primaryLine: primaryLine.lineNum, orphansRemoved,
+                    });
+                  }
+                  } catch (innerErr) {
+                    console.error('[ep_data_tables:compositionend-orphan-repair] inner callback error', {
+                      error: innerErr?.message || innerErr,
+                    });
+                  }
+                }, 'ep_data_tables:compositionend-orphan-repair', true);
+              } catch (aceCallErr) {
+                // This catches errors from ace_callWithAce itself (Etherpad internal state corruption)
+                // When keyToNodeMap.get(...) is undefined, the internal state is corrupted
+                // Don't rethrow - graceful degradation is better than crashing the editor
+                console.warn('[ep_data_tables:compositionend-orphan-repair] ace_callWithAce failed - editor state may need refresh', {
+                  error: aceCallErr?.message || aceCallErr,
+                });
+              }
+            }, 50); // Small delay to let Etherpad process the cell edit first
+
+            desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1, snapshot: null, snapshotMeta: null };
           }, 'tableDesktopCompositionEnd');
         } catch (compositionErr) {
           console.error(`${compLogPrefix} ERROR during desktop composition repair:`, compositionErr);
@@ -5243,9 +6972,24 @@ exports.aceInitialized = (h, ctx) => {
 
   function addTableColumnLeftWithText(tableLines, targetColIndex, editorInfo, docManager) {
     const funcName = 'addTableColumnLeftWithText';
+    __epDT_columnOperationInProgress = true;
     try {
+      // First, update metadata for ALL rows BEFORE modifying content
+      // This prevents postWriteCanonicalize from seeing stale column counts
+      const newColCount = tableLines[0].cols + 1;
+      const equalWidth = 100 / newColCount;
+      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      
       for (const tableLine of tableLines) {
-        const lineText = tableLine.lineText;
+        const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, newColCount, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      // Now insert the new column content for each row
+      for (const tableLine of tableLines) {
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        const lineText = lineEntry?.text || tableLine.lineText;
         const cells = lineText.split(DELIMITER);
 
         let insertPos = 0;
@@ -5259,19 +7003,34 @@ exports.aceInitialized = (h, ctx) => {
 
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
 
-        const rep = editorInfo.ace_getRep();
-        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
-        if (lineEntry) {
-          const newLineText = lineEntry.text || '';
+        // Get fresh rep after text change
+        const repAfter = editorInfo.ace_getRep();
+        const lineEntryAfter = repAfter.lines.atIndex(tableLine.lineIndex);
+        if (lineEntryAfter) {
+          const newLineText = lineEntryAfter.text || '';
           const newCells = newLineText.split(DELIMITER);
+          
+          // First, REMOVE existing tblCell-* attributes from the ENTIRE line
+          // This prevents overlapping cell markers
+          const lineLen = newLineText.length;
+          if (lineLen > 0) {
+            for (let oldCell = 0; oldCell < tableLine.cols; oldCell++) {
+              editorInfo.ace_performDocumentApplyAttributesToRange(
+                [tableLine.lineIndex, 0], 
+                [tableLine.lineIndex, lineLen], 
+                [[ATTR_CELL, '']]  // Empty value removes the attribute
+              );
+            }
+          }
+          
+          // Now apply fresh tblCell-* attributes to each cell
           let offset = 0;
-
-          for (let c = 0; c < tableLine.cols + 1; c++) {
+          for (let c = 0; c < newColCount; c++) {
             const cellContent = (c < newCells.length) ? newCells[c] || '' : '';
             if (cellContent.length > 0) {
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-             // log(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -5280,14 +7039,6 @@ exports.aceInitialized = (h, ctx) => {
             }
           }
         }
-
-        const newColCount = tableLine.cols + 1;
-        const equalWidth = 100 / newColCount;
-        const normalizedWidths = Array(newColCount).fill(equalWidth);
-      // log(`[ep_data_tables] addTableColumnLeft: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
-
-        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
-        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
 
       editorInfo.ace_fastIncorp(10);
@@ -5295,14 +7046,31 @@ exports.aceInitialized = (h, ctx) => {
     } catch (e) {
       console.error('[ep_data_tables] Error adding column left with text:', e);
       return false;
+    } finally {
+      __epDT_columnOperationInProgress = false;
     }
   }
 
   function addTableColumnRightWithText(tableLines, targetColIndex, editorInfo, docManager) {
     const funcName = 'addTableColumnRightWithText';
+    __epDT_columnOperationInProgress = true;
     try {
+      // First, update metadata for ALL rows BEFORE modifying content
+      // This prevents postWriteCanonicalize from seeing stale column counts
+      const newColCount = tableLines[0].cols + 1;
+      const equalWidth = 100 / newColCount;
+      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      
       for (const tableLine of tableLines) {
-        const lineText = tableLine.lineText;
+        const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, newColCount, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      // Now insert the new column content for each row
+      for (const tableLine of tableLines) {
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        const lineText = lineEntry?.text || tableLine.lineText;
         const cells = lineText.split(DELIMITER);
 
         let insertPos = 0;
@@ -5317,19 +7085,34 @@ exports.aceInitialized = (h, ctx) => {
 
         editorInfo.ace_performDocumentReplaceRange(insertStart, insertEnd, textToInsert);
 
-        const rep = editorInfo.ace_getRep();
-        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
-        if (lineEntry) {
-          const newLineText = lineEntry.text || '';
+        // Get fresh rep after text change
+        const repAfter = editorInfo.ace_getRep();
+        const lineEntryAfter = repAfter.lines.atIndex(tableLine.lineIndex);
+        if (lineEntryAfter) {
+          const newLineText = lineEntryAfter.text || '';
           const newCells = newLineText.split(DELIMITER);
+          
+          // First, REMOVE existing tblCell-* attributes from the ENTIRE line
+          // This prevents overlapping cell markers
+          const lineLen = newLineText.length;
+          if (lineLen > 0) {
+            for (let oldCell = 0; oldCell < tableLine.cols; oldCell++) {
+              editorInfo.ace_performDocumentApplyAttributesToRange(
+                [tableLine.lineIndex, 0], 
+                [tableLine.lineIndex, lineLen], 
+                [[ATTR_CELL, '']]  // Empty value removes the attribute
+              );
+            }
+          }
+          
+          // Now apply fresh tblCell-* attributes to each cell
           let offset = 0;
-
-          for (let c = 0; c < tableLine.cols + 1; c++) {
+          for (let c = 0; c < newColCount; c++) {
             const cellContent = (c < newCells.length) ? newCells[c] || '' : '';
             if (cellContent.length > 0) {
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-             // log(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL} attribute to Line ${tableLine.lineIndex} Col ${c} Range ${offset}-${offset + cellContent.length}`);
+              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -5338,14 +7121,6 @@ exports.aceInitialized = (h, ctx) => {
             }
           }
         }
-
-        const newColCount = tableLine.cols + 1;
-        const equalWidth = 100 / newColCount;
-        const normalizedWidths = Array(newColCount).fill(equalWidth);
-       // log(`[ep_data_tables] addTableColumnRight: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
-
-        const newMetadata = { ...tableLine.metadata, cols: tableLine.cols + 1, columnWidths: normalizedWidths };
-        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, tableLine.cols + 1, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
 
       editorInfo.ace_fastIncorp(10);
@@ -5353,6 +7128,8 @@ exports.aceInitialized = (h, ctx) => {
     } catch (e) {
       console.error('[ep_data_tables] Error adding column right with text:', e);
       return false;
+    } finally {
+      __epDT_columnOperationInProgress = false;
     }
   }
 
@@ -5424,13 +7201,34 @@ exports.aceInitialized = (h, ctx) => {
     }
   }
   function deleteTableColumnWithText(tableLines, targetColIndex, editorInfo, docManager) {
+    const funcName = 'deleteTableColumnWithText';
+    __epDT_columnOperationInProgress = true;
     try {
+      const newColCount = tableLines[0].cols - 1;
+      if (newColCount <= 0) {
+        console.warn('[ep_data_tables] Cannot delete column - would result in 0 columns');
+        return false;
+      }
+      
+      // First, update metadata for ALL rows BEFORE modifying content
+      // This prevents postWriteCanonicalize from seeing stale column counts
+      const equalWidth = 100 / newColCount;
+      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      
       for (const tableLine of tableLines) {
-        const lineText = tableLine.lineText;
+        const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
+        applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, newColCount, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+      }
+      
+      // Now delete the column content for each row
+      for (const tableLine of tableLines) {
+        const rep = editorInfo.ace_getRep();
+        const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
+        const lineText = lineEntry?.text || tableLine.lineText;
         const cells = lineText.split(DELIMITER);
 
         if (targetColIndex >= cells.length) {
-         // log(`[ep_data_tables] Warning: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
+          console.debug(`[ep_data_tables] ${funcName}: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
           continue;
         }
 
@@ -5449,21 +7247,45 @@ exports.aceInitialized = (h, ctx) => {
           deleteStart -= DELIMITER.length;
         }
 
-       // log(`[ep_data_tables] Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd} from "${lineText}"`);
+        console.debug(`[ep_data_tables] ${funcName}: Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd}`);
 
         const rangeStart = [tableLine.lineIndex, deleteStart];
         const rangeEnd = [tableLine.lineIndex, deleteEnd];
 
         editorInfo.ace_performDocumentReplaceRange(rangeStart, rangeEnd, '');
 
-        const newColCount = tableLine.cols - 1;
-        if (newColCount > 0) {
-          const equalWidth = 100 / newColCount;
-          const normalizedWidths = Array(newColCount).fill(equalWidth);
-         // log(`[ep_data_tables] deleteTableColumn: Reset all column widths to equal distribution: ${newColCount} columns at ${equalWidth.toFixed(1)}% each`);
-
-          const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
-          applyTableLineMetadataAttribute(tableLine.lineIndex, tableLine.metadata.tblId, tableLine.metadata.row, newColCount, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
+        // Get fresh rep after text change and re-apply tblCell attributes
+        const repAfter = editorInfo.ace_getRep();
+        const lineEntryAfter = repAfter.lines.atIndex(tableLine.lineIndex);
+        if (lineEntryAfter) {
+          const newLineText = lineEntryAfter.text || '';
+          const newCells = newLineText.split(DELIMITER);
+          
+          // First, REMOVE existing tblCell-* attributes from the ENTIRE line
+          const lineLen = newLineText.length;
+          if (lineLen > 0) {
+            editorInfo.ace_performDocumentApplyAttributesToRange(
+              [tableLine.lineIndex, 0], 
+              [tableLine.lineIndex, lineLen], 
+              [[ATTR_CELL, '']]  // Empty value removes the attribute
+            );
+          }
+          
+          // Now apply fresh tblCell-* attributes to each remaining cell
+          let offset = 0;
+          for (let c = 0; c < newColCount; c++) {
+            const cellContent = (c < newCells.length) ? newCells[c] || '' : '';
+            if (cellContent.length > 0) {
+              const cellStart = [tableLine.lineIndex, offset];
+              const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
+              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
+              editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
+            }
+            offset += cellContent.length;
+            if (c < newCells.length - 1) {
+              offset += DELIMITER.length;
+            }
+          }
         }
       }
 
@@ -5472,6 +7294,8 @@ exports.aceInitialized = (h, ctx) => {
     } catch (e) {
       console.error('[ep_data_tables] Error deleting column with text:', e);
       return false;
+    } finally {
+      __epDT_columnOperationInProgress = false;
     }
   }
 
@@ -5573,14 +7397,100 @@ exports.aceRegisterBlockElements = () => ['table'];
 exports.ccRegisterBlockElements = () => ['table'];
 
 // Emit canonical row text during DOM->changeset collection to avoid IME collapse
+// Also SUPPRESS orphan tbljson spans that are NOT inside a table to prevent line fragmentation
 exports.collectContentLineText = (hookName, context) => {
   try {
     const {cc, state, node} = context || {};
     if (!node || node.nodeType !== (typeof Node !== 'undefined' ? Node.TEXT_NODE : 3)) return;
     const parentEl = node.parentElement || (node.parentNode && node.parentNode.nodeType === 1 ? node.parentNode : null);
     if (!parentEl || typeof parentEl.closest !== 'function') return;
+    
     const table = parentEl.closest('table.dataTable[data-tblId], table.dataTable[data-tblid]');
-    if (!table) return;
+    
+    // CRITICAL: Check for orphan table-related spans that are NOT inside a table
+    // These are corrupted fragments that would create extra lines if not suppressed
+    // NOTE: Check BOTH tbljson-* AND tblCell-* classes - browser may strip tbljson- during IME
+    if (!table) {
+      // Check if parent or ancestors have tbljson-* OR tblCell-* class but no table ancestor
+      // Use classList for reliable class detection across browsers
+      const hasTableRelatedClass = (el) => {
+        if (!el) return false;
+        // Method 1: Check classList (most reliable)
+        if (el.classList && el.classList.length > 0) {
+          for (const cls of el.classList) {
+            // Check BOTH tbljson-* and tblCell-* patterns
+            if (cls.startsWith('tbljson-') || cls.startsWith('tblCell-')) return true;
+          }
+        }
+        // Method 2: Fallback to className string check
+        if (el.className) {
+          const classStr = typeof el.className === 'string' ? el.className : String(el.className);
+          if (classStr.includes('tbljson-') || classStr.includes('tblCell-')) return true;
+        }
+        return false;
+      };
+      
+      let checkEl = parentEl;
+      let foundOrphanTableSpan = false;
+      let detectedClass = null;
+      const docBody = node.ownerDocument?.body || document.body;
+      while (checkEl && checkEl !== docBody) {
+        if (hasTableRelatedClass(checkEl)) {
+          foundOrphanTableSpan = true;
+          // Capture which class triggered detection for logging
+          try {
+            for (const cls of (checkEl.classList || [])) {
+              if (cls.startsWith('tbljson-') || cls.startsWith('tblCell-')) {
+                detectedClass = cls;
+                break;
+              }
+            }
+          } catch (_) {}
+          break;
+        }
+        checkEl = checkEl.parentElement;
+      }
+      
+      if (foundOrphanTableSpan) {
+        // This is an ORPHAN table-related span - suppress its text to prevent line fragmentation
+        context.text = '';
+        try {
+          const lineDiv = parentEl.closest('div.ace-line');
+          const classStr = parentEl.className ? String(parentEl.className) : '';
+          console.debug('[ep_data_tables:collector] SUPPRESSED orphan table span', {
+            lineId: lineDiv?.id || null,
+            parentClass: classStr.slice(0, 100),
+            detectedClass,
+            originalText: node.nodeValue?.slice(0, 50),
+          });
+        } catch (_) {}
+        return;
+      }
+      
+      // CRITICAL FIX: Check if this ace-line contains a table even though this text node isn't in it
+      // If so, suppress this text - it's stray content that shouldn't be part of the table row
+      // This handles cases where IME corruption puts non-table content on the same line as a table
+      try {
+        const lineDiv = parentEl.closest('div.ace-line');
+        if (lineDiv) {
+          const tableInLine = lineDiv.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]');
+          if (tableInLine) {
+            // This ace-line has a table, but this text node is NOT inside the table
+            // This is stray content that would corrupt the table - suppress it
+            context.text = '';
+            console.debug('[ep_data_tables:collector] SUPPRESSED non-table content in table line', {
+              lineId: lineDiv.id || null,
+              originalText: node.nodeValue?.slice(0, 50),
+              tblId: tableInLine.getAttribute('data-tblId') || tableInLine.getAttribute('data-tblid'),
+            });
+            return;
+          }
+        }
+      } catch (_) {}
+      
+      // Not a table-related element, let normal collection proceed
+      return;
+    }
 
     // Only emit once per ace line during collection
     if (state && state._epDT_emittedCanonical) { 
@@ -5603,12 +7513,34 @@ exports.collectContentLineText = (hookName, context) => {
     const tr = table.querySelector('tbody > tr');
     if (!tr || !tr.children || tr.children.length === 0) return;
 
-    const sanitize = (s) => {
-      let x = (s || '').replace(new RegExp(DELIMITER, 'g'), ' ').replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+    // Sanitize cell text, but PRESERVE zero-width characters for images
+    // Images use U+200B as placeholder - if we strip it, images disappear
+    const sanitize = (s, hasImage) => {
+      let x = (s || '').replace(new RegExp(DELIMITER, 'g'), ' ');
+      // Only strip zero-width chars if this cell doesn't contain images
+      // Images rely on U+200B as their text placeholder
+      if (!hasImage) {
+        x = x.replace(/[\u200B\u200C\u200D\uFEFF]/g, '');
+      }
       if (!x) x = ' ';
       return x;
     };
-    const cells = Array.from(tr.children).map((td) => sanitize(td.innerText || ''));
+    
+    // Detect if a cell contains image content by checking for image classes OR ZWS in content
+    // We check content directly because after Grammarly edits, image spans may be corrupted
+    // but the ZWS placeholder characters may still be in the text
+    const cellHasImage = (td) => {
+      // Check for image spans
+      const imageSpan = td.querySelector('[class*="image:"], [class*="inline-image"], span.image-placeholder');
+      if (imageSpan) return true;
+      // Also preserve if content already contains ZWS (likely image placeholder)
+      // This handles cases where the image DOM structure is temporarily corrupted
+      const text = td.innerText || td.textContent || '';
+      if (/[\u200B\u200C\u200D\uFEFF]/.test(text)) return true;
+      return false;
+    };
+    
+    const cells = Array.from(tr.children).map((td) => sanitize(td.innerText || '', cellHasImage(td)));
     const canonical = cells.join(DELIMITER);
     context.text = canonical;
 
