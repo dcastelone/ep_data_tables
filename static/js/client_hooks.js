@@ -58,6 +58,139 @@ const __epDT_postWriteScheduled = new Set();
 let __epDT_compositionOriginalLine = { tblId: null, lineNum: null, timestamp: 0 };
 // Flag to prevent postWriteCanonicalize from interfering during column operations
 let __epDT_columnOperationInProgress = false;
+
+// CRITICAL: Flag indicating DOM is desynced from Etherpad's internal state
+// This is set when we detect keyToNodeMap errors (caused by browser extensions modifying DOM)
+// When true, ALL destructive operations (line deletions) are blocked to prevent data loss
+let __epDT_domDesynced = false;
+let __epDT_desyncErrorCount = 0;
+const __epDT_MAX_DESYNC_ERRORS = 3; // After this many errors, enter permanent safe mode
+
+/**
+ * Check if it's safe to perform destructive operations (line deletions).
+ * Returns false if we've detected DOM desync from browser extensions.
+ * @param {string} operation - Description of the operation for logging
+ * @returns {boolean} - True if safe to proceed, false if should skip
+ */
+const isDestructiveOperationSafe = (operation) => {
+  if (__epDT_domDesynced) {
+    console.warn(`[ep_data_tables:SAFE_MODE] Blocking destructive operation: ${operation} (DOM desynced by extension)`);
+    return false;
+  }
+  return true;
+};
+
+/**
+ * Handle keyToNodeMap errors from browser extensions modifying the DOM.
+ * When detected, enters safe mode to prevent data loss.
+ */
+const handleDomDesyncError = (error, source) => {
+  const errorStr = String(error?.message || error || '');
+  const stackStr = String(error?.stack || '');
+  
+  // Detect keyToNodeMap errors
+  if (errorStr.includes('entry') || stackStr.includes('atKey') || stackStr.includes('keyToNodeMap')) {
+    __epDT_desyncErrorCount++;
+    console.error(`[ep_data_tables:DOM_DESYNC] keyToNodeMap error detected (${__epDT_desyncErrorCount}/${__epDT_MAX_DESYNC_ERRORS})`, {
+      source,
+      error: errorStr.slice(0, 200),
+    });
+    
+    if (__epDT_desyncErrorCount >= __epDT_MAX_DESYNC_ERRORS) {
+      __epDT_domDesynced = true;
+      console.error('[ep_data_tables:DOM_DESYNC] Entering SAFE MODE - destructive operations blocked');
+      console.error('[ep_data_tables:DOM_DESYNC] A browser extension may be modifying the page. Consider refreshing.');
+      
+      // Show user notification (non-blocking)
+      try {
+        if (typeof $.gritter !== 'undefined' && $.gritter.add) {
+          $.gritter.add({
+            title: 'Table Editor: Safe Mode',
+            text: 'A browser extension is interfering with the editor. Some operations are disabled. Consider refreshing the page.',
+            sticky: true,
+            class_name: 'gritter-warning',
+          });
+        }
+      } catch (_) {}
+    }
+    return true; // Error was a desync error
+  }
+  return false; // Not a desync error
+};
+
+// Install global error handler to detect keyToNodeMap errors from Etherpad core
+if (typeof window !== 'undefined' && !window.__epDT_errorHandlerInstalled) {
+  window.__epDT_errorHandlerInstalled = true;
+  
+  const originalOnError = window.onerror;
+  window.onerror = function(message, source, lineno, colno, error) {
+    handleDomDesyncError(error || message, 'window.onerror');
+    if (originalOnError) {
+      return originalOnError.call(this, message, source, lineno, colno, error);
+    }
+    return false; // Don't suppress the error
+  };
+  
+  // Also catch unhandled promise rejections
+  window.addEventListener('unhandledrejection', (event) => {
+    handleDomDesyncError(event.reason, 'unhandledrejection');
+  });
+}
+
+/**
+ * Validate that a line is safe to operate on.
+ * Returns true if the line exists, has a valid lineNode, and the node is still in the DOM.
+ * This prevents keyToNodeMap errors from IME composition or Grammarly desyncs.
+ * @param {Object} rep - The Etherpad rep object from ace.ace_getRep()
+ * @param {number} lineNum - The line number to validate
+ * @param {string} logPrefix - Optional prefix for debug logging
+ * @returns {boolean} - True if safe to modify, false otherwise
+ */
+const isLineSafeToModify = (rep, lineNum, logPrefix = '') => {
+  try {
+    if (!rep || !rep.lines) {
+      if (logPrefix) console.debug(logPrefix, 'rep invalid');
+      return false;
+    }
+    
+    const lineCount = rep.lines.length();
+    if (lineNum < 0 || lineNum >= lineCount) {
+      if (logPrefix) console.debug(logPrefix, 'line out of bounds', { lineNum, lineCount });
+      return false;
+    }
+    
+    const lineEntry = rep.lines.atIndex(lineNum);
+    if (!lineEntry) {
+      if (logPrefix) console.debug(logPrefix, 'no line entry', { lineNum });
+      return false;
+    }
+    
+    // CRITICAL: Check lineNode exists
+    if (!lineEntry.lineNode) {
+      if (logPrefix) console.debug(logPrefix, 'lineNode missing', { lineNum });
+      return false;
+    }
+    
+    // CRITICAL: Check lineNode is still in the DOM
+    // This catches IME/Grammarly-induced desyncs where node was removed
+    if (!lineEntry.lineNode.parentNode) {
+      if (logPrefix) console.debug(logPrefix, 'lineNode orphaned (not in DOM)', { lineNum });
+      return false;
+    }
+    
+    // Modern check: isConnected property (more reliable)
+    if (typeof lineEntry.lineNode.isConnected === 'boolean' && !lineEntry.lineNode.isConnected) {
+      if (logPrefix) console.debug(logPrefix, 'lineNode not connected', { lineNum });
+      return false;
+    }
+    
+    return true;
+  } catch (err) {
+    if (logPrefix) console.debug(logPrefix, 'validation error', err?.message);
+    return false;
+  }
+};
+
 function isAndroidUA() {
   const ua = (navigator.userAgent || '').toLowerCase();
   const isAndroid = ua.includes('android');
@@ -1183,6 +1316,12 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                   toLen: canonical.length,
                 });
                 if (!textMatches) {
+                  // Validate line is safe to modify before replacement (prevents keyToNodeMap errors)
+                  const repBeforeRepair = ace.ace_getRep();
+                  if (!isLineSafeToModify(repBeforeRepair, ln, '[ep_data_tables:postWriteCanonicalize] repair')) {
+                    console.warn('[ep_data_tables:postWriteCanonicalize] line not safe to modify, skipping repair');
+                    return cb();
+                  }
                 ace.ace_performDocumentReplaceRange([ln, 0], [ln, currentText.length], canonical);
                 }
                 // Note: If lineHasTableDOM is false, orphan detection below will handle finding the real table
@@ -1567,6 +1706,11 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                 }
                 
                 // Apply merged content to main line
+                // First validate the line is safe to modify (prevents keyToNodeMap errors)
+                const repBeforeMerge = ace.ace_getRep();
+                if (!isLineSafeToModify(repBeforeMerge, ln, '[ep_data_tables:postWriteCanonicalize] merge-target')) {
+                  console.warn('[ep_data_tables:postWriteCanonicalize] main line not safe to modify, aborting merge');
+                } else {
                 const mergedCanonical = mergedCells.join(DELIMITER);
                 if (mergedCanonical !== mainText) {
                   console.debug('[ep_data_tables:postWriteCanonicalize] applying merged canonical line', {
@@ -1597,30 +1741,21 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                     console.error('[ep_data_tables:postWriteCanonicalize] failed to re-apply tbljson after merge', metaMergeErr);
                   }
                       }
+                } // end isLineSafeToModify check for merge target
 
                 // Now safely delete orphan lines (bottom-up to preserve line numbers)
                 // CRITICAL: Validate each line before operating to prevent keyToNodeMap errors
+                // CRITICAL: Check for DOM desync before any destructive operations
+                if (!isDestructiveOperationSafe('postWriteCanonicalize orphan removal')) {
+                  console.debug('[ep_data_tables:postWriteCanonicalize] skipping orphan removal (safe mode)');
+                } else {
                 orphanLines.sort((a, b) => b.lineNum - a.lineNum).forEach((orphan) => {
                     try {
                       // Re-fetch rep to get current state after any previous deletions
                       const repCheck = ace.ace_getRep();
-                      if (!repCheck || !repCheck.lines) {
-                        console.warn('[ep_data_tables:postWriteCanonicalize] rep invalid, skipping orphan removal');
-                        return;
-                      }
-                      const currentLineCount = repCheck.lines.length();
-                      if (orphan.lineNum >= currentLineCount) {
-                        console.debug('[ep_data_tables:postWriteCanonicalize] orphan line no longer exists', {
-                          orphanLine: orphan.lineNum, currentLineCount,
-                        });
-                        return;
-                      }
-                      // Verify line entry exists
-                      const orphanEntry = repCheck.lines.atIndex(orphan.lineNum);
-                      if (!orphanEntry) {
-                        console.debug('[ep_data_tables:postWriteCanonicalize] orphan line has no entry', {
-                          orphanLine: orphan.lineNum,
-                        });
+                      
+                      // Use comprehensive validation to prevent keyToNodeMap errors (IME/Grammarly)
+                      if (!isLineSafeToModify(repCheck, orphan.lineNum, '[ep_data_tables:postWriteCanonicalize] orphan')) {
                         return;
                       }
                       
@@ -1640,8 +1775,11 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                       orphanLine: orphan.lineNum,
                       error: orphanRemErr?.message || orphanRemErr,
                     });
+                    // Check if this was a desync error
+                    handleDomDesyncError(orphanRemErr, 'postWriteCanonicalize orphan removal');
                     }
                   });
+                }
                   
                 // Clean up spurious blank lines between this table row and the next
                 // These can be created when orphan content gets merged and lines shift
@@ -1679,16 +1817,27 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                     }
                     
                     // Remove blank lines bottom-up to preserve line numbers
+                    // Check for DOM desync before destructive operations
+                    if (!isDestructiveOperationSafe('postWriteCanonicalize blank line removal')) {
+                      console.debug('[ep_data_tables:postWriteCanonicalize] skipping blank line removal (safe mode)');
+                    } else {
                     blankLinesToRemove.sort((a, b) => b - a).forEach((blankLineNum) => {
                       try {
+                        // Re-fetch rep and validate line before removal (prevents keyToNodeMap errors)
+                        const repBlankCheck = ace.ace_getRep();
+                        if (!isLineSafeToModify(repBlankCheck, blankLineNum, '[ep_data_tables:postWriteCanonicalize] blank')) {
+                          return;
+                        }
                         console.debug('[ep_data_tables:postWriteCanonicalize] removing spurious blank line between table rows', {
                           blankLineNum, betweenRows: [capturedRow, nextRowNum],
                         });
                         ace.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
                       } catch (blankRemErr) {
                         console.error('[ep_data_tables:postWriteCanonicalize] blank line removal error', blankRemErr);
+                        handleDomDesyncError(blankRemErr, 'postWriteCanonicalize blank removal');
                       }
                     });
+                    }
                   }
                 } catch (cleanupErr) {
                   console.error('[ep_data_tables:postWriteCanonicalize] blank line cleanup error', cleanupErr);
@@ -1729,17 +1878,22 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
                   }
                   
                   // Remove blank lines bottom-up
-                  if (blankLinesToClean.length > 0) {
+                  // Check for DOM desync before destructive operations
+                  if (blankLinesToClean.length > 0 && isDestructiveOperationSafe('postWriteCanonicalize blank-after removal')) {
                     blankLinesToClean.sort((a, b) => b - a).forEach((blankLineNum) => {
                       try {
                         const checkRep = ace.ace_getRep();
-                        if (checkRep && blankLineNum < checkRep.lines.length()) {
-                          console.debug('[ep_data_tables:postWriteCanonicalize] removing blank line after repair', {
-                            blankLineNum, afterRow: capturedRow,
-                          });
-                          ace.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
+                        // Use comprehensive validation to prevent keyToNodeMap errors (IME/Grammarly)
+                        if (!isLineSafeToModify(checkRep, blankLineNum, '[ep_data_tables:postWriteCanonicalize] blank-after')) {
+                          return;
                         }
-                      } catch (_) {}
+                        console.debug('[ep_data_tables:postWriteCanonicalize] removing blank line after repair', {
+                          blankLineNum, afterRow: capturedRow,
+                        });
+                        ace.ace_performDocumentReplaceRange([blankLineNum, 0], [blankLineNum + 1, 0], '');
+                      } catch (blankErr) {
+                        handleDomDesyncError(blankErr, 'postWriteCanonicalize blank-after');
+                      }
                     });
                   }
                 }
@@ -3249,6 +3403,12 @@ exports.aceInitialized = (h, ctx) => {
               });
               return;
             }
+            
+            // Validate line is safe to modify (prevents keyToNodeMap errors from IME/Grammarly)
+            if (!isLineSafeToModify(repBefore, lineNum, `[ep_data_tables:${logTag}]`)) {
+              logCompositionEvent(`${logTag}-ace-unsafe-line`, evt, { lineNum });
+              return;
+            }
 
             // Use pre-captured styling if available (from before collection), 
             // otherwise try to extract from current DOM (may be stale)
@@ -3689,10 +3849,29 @@ exports.aceInitialized = (h, ctx) => {
               // We need to re-read the line to get the actual content after collection.
               ed.ace_callWithAce((aceInstance) => {
                 const freshRep = aceInstance.ace_getRep();
-                const freshLineEntry = freshRep.lines.atIndex(lineNum);
+                
+                // CRITICAL FIX: Use preCapturedLineNum for styling, NOT the potentially stale lineNum!
+                // The styling was extracted from preCapturedLineNum, so it must be applied back there.
+                // lineNum might have shifted due to cursor movement or blank line cleanup.
+                // After Grammarly edits, rep.selStart[0] may point to a different line than where
+                // the styling was originally captured from the DOM.
+                const stylingLineNum = (preCapturedLineNum >= 0 && preCapturedLineNum < freshRep.lines.length())
+                  ? preCapturedLineNum
+                  : lineNum;
+                
+                const freshLineEntry = freshRep.lines.atIndex(stylingLineNum);
                 const freshLineText = freshLineEntry?.text || '';
                 const actualCells = freshLineText.split(DELIMITER);
-                reapplyStylingToLine(aceInstance, lineNum, actualCells, usablePreCapturedStyling);
+                
+                console.debug('[ep_data_tables:input-commit] reapply-styling', {
+                  originalLineNum: lineNum,
+                  preCapturedLineNum,
+                  usingStylingLineNum: stylingLineNum,
+                  cellCount: actualCells.length,
+                  stylingCount: usablePreCapturedStyling.length,
+                });
+                
+                reapplyStylingToLine(aceInstance, stylingLineNum, actualCells, usablePreCapturedStyling);
                 
                 // Clean up any blank lines that may have been created after this table row
                 // This can happen with Grammarly and other extensions
@@ -3703,7 +3882,8 @@ exports.aceInitialized = (h, ctx) => {
                     const blankLinesToRemove = [];
                     
                     // Scan for blank lines immediately after this row
-                    for (let li = lineNum + 1; li < totalLines && li < lineNum + 10; li++) {
+                    // Use stylingLineNum (the correct table line) not lineNum
+                    for (let li = stylingLineNum + 1; li < totalLines && li < stylingLineNum + 10; li++) {
                       const checkEntry = repAfter.lines.atIndex(li);
                       const checkText = checkEntry?.text || '';
                       
@@ -3723,7 +3903,7 @@ exports.aceInitialized = (h, ctx) => {
                     // Remove blank lines bottom-up to preserve line numbers
                     if (blankLinesToRemove.length > 0) {
                       console.debug('[ep_data_tables:input-commit] cleaning up blank lines', {
-                        lineNum, blankLines: blankLinesToRemove,
+                        stylingLineNum, blankLines: blankLinesToRemove,
                       });
                       blankLinesToRemove.sort((a, b) => b - a).forEach((blankLineNum) => {
                         try {
@@ -5097,6 +5277,11 @@ exports.aceInitialized = (h, ctx) => {
           const freshSelStart = freshRep.selStart;
           const freshSelEnd = freshRep.selEnd;
 
+          // Validate line is safe to modify before replacement (prevents keyToNodeMap errors)
+          if (!isLineSafeToModify(freshRep, freshSelStart[0], '[ep_data_tables:beforeinput-commit]')) {
+            console.warn('[ep_data_tables:beforeinput-commit] line not safe to modify, skipping');
+            return;
+          }
           ace.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
 
           const afterRep = ace.ace_getRep();
@@ -5846,6 +6031,10 @@ exports.aceInitialized = (h, ctx) => {
                     const mergedText = baseCells.join(DELIMITER);
                     
                     // Update primary line with merged content
+                    // First validate the line is safe to modify (prevents keyToNodeMap errors)
+                    if (!isLineSafeToModify(repPost, primaryLine.lineNum, '[ep_data_tables:compositionend-orphan-repair] primary')) {
+                      console.warn('[ep_data_tables:compositionend-orphan-repair] primary line not safe to modify, aborting merge');
+                    } else {
                     const currentPrimaryText = repPost.lines.atIndex(primaryLine.lineNum)?.text || '';
                     if (mergedText !== currentPrimaryText) {
                       console.debug('[ep_data_tables:compositionend-orphan-repair] applying merged text', {
@@ -5872,33 +6061,23 @@ exports.aceInitialized = (h, ctx) => {
                         if (ci < baseCells.length - 1) offset += DELIMITER.length;
                       }
                     }
+                    } // end isLineSafeToModify check for primary line
                     
                     // Delete orphan lines (bottom-up to preserve line numbers)
                     // Content has already been merged, so this is safe
-                    // CRITICAL: Wrap each operation in try-catch to prevent cascade failures
+                    // CRITICAL: Check for DOM desync before any destructive operations
+                    if (!isDestructiveOperationSafe('compositionend-orphan-repair orphan removal')) {
+                      console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan removal (safe mode)');
+                    } else {
                     orphans.sort((a, b) => b.lineNum - a.lineNum);
                     let orphansRemoved = 0;
                     for (const orphan of orphans) {
                       try {
                         // Re-fetch rep to get current line count (may have changed after previous deletions)
                         const repCheck = ace2.ace_getRep();
-                        if (!repCheck || !repCheck.lines) {
-                          console.warn('[ep_data_tables:compositionend-orphan-repair] rep invalid, aborting', { orphan: orphan.lineNum });
-                          break;
-                        }
-                        const currentLineCount = repCheck.lines.length();
-                        if (orphan.lineNum >= currentLineCount) {
-                          console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan - line no longer exists', {
-                            orphanLine: orphan.lineNum, currentLineCount,
-                          });
-                          continue;
-                        }
-                        // Verify the line entry exists before operating on it
-                        const orphanEntry = repCheck.lines.atIndex(orphan.lineNum);
-                        if (!orphanEntry) {
-                          console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan - no entry', {
-                            orphanLine: orphan.lineNum,
-                          });
+                        
+                        // Use comprehensive validation to prevent keyToNodeMap errors (IME/Grammarly)
+                        if (!isLineSafeToModify(repCheck, orphan.lineNum, '[ep_data_tables:compositionend-orphan-repair]')) {
                           continue;
                         }
                         
@@ -5920,8 +6099,11 @@ exports.aceInitialized = (h, ctx) => {
                           orphanLine: orphan.lineNum,
                           error: orphanDeleteErr?.message || orphanDeleteErr,
                         });
+                        // Check if this was a desync error
+                        handleDomDesyncError(orphanDeleteErr, 'compositionend-orphan-repair');
                         // Don't break - try to continue with remaining orphans
                       }
+                    }
                     }
                     try { ace2.ace_fastIncorp(5); } catch (incErr) {
                       console.debug('[ep_data_tables:compositionend-orphan-repair] fastIncorp error (non-fatal)', incErr?.message);
@@ -7613,19 +7795,106 @@ exports.collectContentLineText = (hookName, context) => {
     
     const cells = Array.from(tr.children).map((td) => sanitize(td.innerText || '', cellHasImage(td)));
     const canonical = cells.join(DELIMITER);
-    context.text = canonical;
-
+    
+    // CRITICAL: Check if we actually need to emit canonical text
+    // If the existing line already has correct structure, DON'T emit canonical
+    // This preserves styling when browser extensions trigger re-collection without actual edits
+    // Canonical emission strips all character attributes (bold, font-size, author, images)!
+    //
+    // THREE OUTCOMES:
+    // 1. SKIP emit (structure verified matching) → preserves styling
+    // 2. EMIT canonical (structure verified mismatched) → fixes corruption, loses styling  
+    // 3. EMIT canonical (can't verify) → preserves structure, may lose styling, but line not deleted
+    
+    let skipCanonical = false;
+    
     try {
       const lineDiv = parentEl.closest && parentEl.closest('div.ace-line');
       const rep = cc && cc.rep;
-      const lineIndex = (lineDiv && rep && rep.lines && typeof rep.lines.indexOfKey === 'function')
-        ? rep.lines.indexOfKey(lineDiv.id)
-        : null;
+      
+      // If we have full line context, compare structures
+      if (lineDiv && rep && rep.lines && typeof rep.lines.indexOfKey === 'function') {
+        const lineIndex = rep.lines.indexOfKey(lineDiv.id);
+        
+        if (lineIndex >= 0 && lineIndex < rep.lines.length()) {
+          const existingEntry = rep.lines.atIndex(lineIndex);
+          const existingText = existingEntry?.text || '';
+          
+          // FAST PATH: Exact match - no need to emit, styling is preserved
+          if (existingText === canonical) {
+            console.debug('[ep_data_tables:collector] SKIP emit (exact match, preserving styling)', {
+              lineId: lineDiv.id,
+              lineIndex,
+              cells: cells.length,
+            });
+            skipCanonical = true;
+          } else {
+            // STRUCTURAL CHECK: Compare cell-by-cell
+            const existingCells = existingText.split(DELIMITER);
+            if (existingCells.length === cells.length) {
+              let isStructuralMatch = true;
+              for (let i = 0; i < cells.length; i++) {
+                // Compare trimmed content - ignore whitespace and ZWS differences
+                const existingNorm = (existingCells[i] || '').replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim();
+                const newNorm = (cells[i] || '').replace(/[\u200B\u200C\u200D\uFEFF]/g, '').trim();
+                
+                if (existingNorm !== newNorm) {
+                  isStructuralMatch = false;
+                  break;
+                }
+              }
+              
+              if (isStructuralMatch) {
+                console.debug('[ep_data_tables:collector] SKIP emit (structural match, preserving styling)', {
+                  lineId: lineDiv.id,
+                  lineIndex,
+                  cells: cells.length,
+                });
+                skipCanonical = true;
+              } else {
+                console.debug('[ep_data_tables:collector] emit needed (content mismatch)', {
+                  lineId: lineDiv.id,
+                  lineIndex,
+                  existingCellCount: existingCells.length,
+                  newCellCount: cells.length,
+                });
+              }
+            } else {
+              console.debug('[ep_data_tables:collector] emit needed (cell count mismatch)', {
+                lineId: lineDiv.id,
+                lineIndex,
+                existingCellCount: existingCells.length,
+                newCellCount: cells.length,
+              });
+            }
+          }
+        }
+        // If lineIndex invalid, fall through to emit canonical (safer than deleting line)
+      }
+      // If no line context, fall through to emit canonical (safer than deleting line)
+    } catch (matchErr) {
+      // On error, fall through to emit canonical (safer than deleting line)
+      console.debug('[ep_data_tables:collector] structure check error', matchErr?.message);
+    }
+    
+    if (skipCanonical) {
+      // Structure is intact - suppress this text node to avoid duplicate collection
+      // but do NOT suppress ALL text - only this one because we already have the content
+      if (state) state._epDT_emittedCanonical = true;
+      context.text = '';
+      return;
+    }
+    
+    // Emit canonical to preserve table structure (delimiters between cells)
+    // This may lose styling but at least preserves the table and its content
+    context.text = canonical;
+    
+    try {
+      const lineDiv = parentEl.closest && parentEl.closest('div.ace-line');
       console.debug('[ep_data_tables:collector] emit-canonical', {
-        lineId: lineDiv && lineDiv.id || null,
-        lineIndex,
+        lineId: lineDiv?.id || null,
         cells: cells.length,
-        textSample: canonical.slice(0, 100),
+        textSample: canonical.slice(0, 80),
       });
     } catch (_) {}
 
