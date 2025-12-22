@@ -66,6 +66,71 @@ let __epDT_domDesynced = false;
 let __epDT_desyncErrorCount = 0;
 const __epDT_MAX_DESYNC_ERRORS = 3; // After this many errors, enter permanent safe mode
 
+// CRITICAL: Styling cache for recovery when collectContentLineText is forced to emit canonical
+// Key: lineId (magicdomidXXX) → { styling: [...], timestamp: Date.now(), cells: [...] }
+// When we must emit canonical (verified structural mismatch), we capture styling here first.
+// After collection completes, we restore styling from this cache.
+const __epDT_pendingStylingForLine = new Map();
+const __epDT_STYLING_CACHE_TTL_MS = 5000; // Expire after 5 seconds
+
+/**
+ * Store styling for a line before emitting canonical (which destroys styling).
+ * @param {string} lineId - The ace-line DOM ID (magicdomidXXX)
+ * @param {Array} styling - Extracted styling array from extractStylingFromLineDOM
+ * @param {Array} cells - Cell contents at capture time
+ */
+const cacheStylingForLine = (lineId, styling, cells) => {
+  if (!lineId || !styling || styling.length === 0) return;
+  
+  // Cleanup expired entries
+  const now = Date.now();
+  for (const [k, v] of __epDT_pendingStylingForLine.entries()) {
+    if (now - v.timestamp > __epDT_STYLING_CACHE_TTL_MS) {
+      __epDT_pendingStylingForLine.delete(k);
+    }
+  }
+  
+  __epDT_pendingStylingForLine.set(lineId, {
+    styling,
+    cells: cells ? cells.slice() : [],
+    timestamp: now,
+  });
+  
+  console.debug('[ep_data_tables:stylingCache] cached', {
+    lineId: lineId.slice(0, 20),
+    stylingCount: styling.length,
+    cellCount: cells?.length || 0,
+  });
+};
+
+/**
+ * Retrieve cached styling for a line (if not expired).
+ * @param {string} lineId - The ace-line DOM ID
+ * @returns {Object|null} - { styling, cells, timestamp } or null if not found/expired
+ */
+const getCachedStyling = (lineId) => {
+  if (!lineId) return null;
+  const cached = __epDT_pendingStylingForLine.get(lineId);
+  if (!cached) return null;
+  
+  if (Date.now() - cached.timestamp > __epDT_STYLING_CACHE_TTL_MS) {
+    __epDT_pendingStylingForLine.delete(lineId);
+    return null;
+  }
+  
+  return cached;
+};
+
+/**
+ * Clear cached styling for a line (call after restoration).
+ * @param {string} lineId - The ace-line DOM ID
+ */
+const clearCachedStyling = (lineId) => {
+  if (lineId) {
+    __epDT_pendingStylingForLine.delete(lineId);
+  }
+};
+
 /**
  * Check if it's safe to perform destructive operations (line deletions).
  * Returns false if we've detected DOM desync from browser extensions.
@@ -3360,9 +3425,107 @@ exports.aceInitialized = (h, ctx) => {
               total: extractedStyling.length,
               details: appliedDetails,
             });
+            
+            // CRITICAL: After applying all attributes, force immediate incorporation
+            // This ensures all attribute changes are processed together with any pending
+            // text changes, composing them into a single changeset before sending to server.
+            // The parameter (100) is just a debug identifier, not a delay.
+            try {
+              if (typeof aceInstance.ace_fastIncorp === 'function') {
+                aceInstance.ace_fastIncorp(100);
+              }
+            } catch (_) {}
           }
         } catch (err) {
           console.debug('[ep_data_tables:reapplyStyling] error (non-fatal)', err?.message);
+        }
+      };
+      
+      // CRITICAL: Expose styling functions on editorInfo for use by collectContentLineText
+      // This allows the collection hook to capture and restore styling when it must emit canonical
+      ed.ep_data_tables_extractStyling = extractStylingFromLineDOM;
+      
+      /**
+       * Restore cached styling for a line after collection has finished.
+       * Called via setTimeout from collectContentLineText when canonical is emitted.
+       * @param {string} cacheKey - The cache key (lineId like magicdomidXXX, or fallback like tblId:row)
+       * @param {string} [tblId] - Optional table ID for fallback line lookup
+       * @param {number} [row] - Optional row number for fallback line lookup
+       */
+      ed.ep_data_tables_restoreCachedStyling = (cacheKey, tblId, row) => {
+        const cached = getCachedStyling(cacheKey);
+        if (!cached || !cached.styling || cached.styling.length === 0) {
+          console.debug('[ep_data_tables:restoreCachedStyling] no cached styling', { cacheKey: cacheKey?.slice?.(0, 20) || cacheKey });
+          return;
+        }
+        
+        try {
+          ed.ace_callWithAce((aceInstance) => {
+            try {
+              const rep = aceInstance.ace_getRep();
+              if (!rep || !rep.lines) {
+                console.debug('[ep_data_tables:restoreCachedStyling] no rep');
+                return;
+              }
+              
+              let lineIndex = -1;
+              
+              // Try to find line by lineId first (if cacheKey looks like a magicdomid)
+              if (cacheKey && cacheKey.startsWith('magicdomid')) {
+                lineIndex = rep.lines.indexOfKey(cacheKey);
+              }
+              
+              // Fallback: find line by tblId + row (search through all lines)
+              if ((lineIndex < 0 || lineIndex >= rep.lines.length()) && tblId != null && row != null) {
+                const totalLines = rep.lines.length();
+                for (let li = 0; li < totalLines; li++) {
+                  try {
+                    const lineAttr = docManager?.getAttributeOnLine?.(li, ATTR_TABLE_JSON);
+                    if (lineAttr) {
+                      const meta = JSON.parse(lineAttr);
+                      if (meta.tblId === tblId && meta.row === row) {
+                        lineIndex = li;
+                        console.debug('[ep_data_tables:restoreCachedStyling] found via tblId:row', { tblId, row, lineIndex });
+                        break;
+                      }
+                    }
+                  } catch (_) {}
+                }
+              }
+              
+              if (lineIndex < 0 || lineIndex >= rep.lines.length()) {
+                console.debug('[ep_data_tables:restoreCachedStyling] line not found', { 
+                  cacheKey: cacheKey?.slice?.(0, 20) || cacheKey, 
+                  tblId, 
+                  row,
+                  lineIndex 
+                });
+                return;
+              }
+              
+              const lineEntry = rep.lines.atIndex(lineIndex);
+              const lineText = lineEntry?.text || '';
+              const cells = lineText.split(DELIMITER);
+              
+              console.debug('[ep_data_tables:restoreCachedStyling] restoring', {
+                cacheKey: cacheKey?.slice?.(0, 20) || cacheKey,
+                lineIndex,
+                stylingCount: cached.styling.length,
+                cellCount: cells.length,
+              });
+              
+              reapplyStylingToLine(aceInstance, lineIndex, cells, cached.styling);
+              
+              // Clear cache after successful restoration
+              clearCachedStyling(cacheKey);
+              
+              console.debug('[ep_data_tables:restoreCachedStyling] restored successfully');
+            } catch (innerErr) {
+              console.debug('[ep_data_tables:restoreCachedStyling] inner error', innerErr?.message);
+            }
+          }, 'ep_data_tables:restoreCachedStyling', true);
+        } catch (outerErr) {
+          console.debug('[ep_data_tables:restoreCachedStyling] outer error', outerErr?.message);
         }
       };
 
@@ -3977,10 +4140,72 @@ exports.aceInitialized = (h, ctx) => {
             let cellSnapshot = null;
             let originalTableLine = null; // Track where the table actually is
             
+            // CRITICAL: Check if we have a recent expected cursor position from previous composition.
+            // When typing multiple Chinese words in quick succession with space bar,
+            // the browser can move the cursor to the wrong line/cell between compositions.
+            // If the current position differs significantly from expected, recover.
+            let usedCursorRecovery = false;
+            if (desktopComposition && desktopComposition._expectedCursor) {
+              const stored = desktopComposition._expectedCursor;
+              const timeSinceStored = Date.now() - stored.timestamp;
+              
+              // Only use stored position if it was set recently (within 1000ms)
+              if (timeSinceStored < 1000) {
+                const currentLine = lineNum;
+                const expectedLine = stored.lineNum;
+                const expectedCell = stored.cellIndex;
+                
+                // Detect if cursor jumped to a different line or to cell 0 of next line
+                // This is a common pattern when the browser loses cursor position
+                const lineChanged = currentLine !== expectedLine;
+                const seemsWrong = lineChanged && (currentLine === expectedLine + 1);
+                
+                if (seemsWrong) {
+                  // Verify the stored line still has the expected table
+                  const storedMeta = getTableMetadataForLine(expectedLine);
+                  if (storedMeta && storedMeta.tblId === stored.tblId) {
+                    console.debug('[ep_data_tables:compositionstart] CURSOR RECOVERY - detected wrong position', {
+                      currentLine,
+                      expectedLine,
+                      expectedCell,
+                      expectedCol: stored.col,
+                      timeSinceStored,
+                    });
+                    
+                    // Use the stored position instead
+                    lineNum = expectedLine;
+                    cellIndex = expectedCell;
+                    tableMetadata = storedMeta;
+                    originalTableLine = expectedLine;
+                    usedCursorRecovery = true;
+                    
+                    // Fix the actual selection to be on the correct line
+                    try {
+                      ed.ace_callWithAce((aceInstance) => {
+                        aceInstance.ace_performSelectionChange(
+                          [expectedLine, stored.col],
+                          [expectedLine, stored.col],
+                          false
+                        );
+                      }, 'compositionstart-cursor-recovery', true);
+                    } catch (fixErr) {
+                      console.debug('[ep_data_tables:compositionstart] cursor fix error', fixErr?.message);
+                    }
+                  }
+                }
+              }
+              
+              // Clear stored position after use attempt (or if expired)
+              if (timeSinceStored > 1000 || usedCursorRecovery) {
+                delete desktopComposition._expectedCursor;
+              }
+            }
+            
             try {
               // CRITICAL: First, try to find the table from DOM selection
               // This works even if the rep line number is wrong
-              const domTarget = getDomCellTargetFromSelection();
+              // Skip DOM detection if we already recovered from stored position
+              const domTarget = usedCursorRecovery ? null : getDomCellTargetFromSelection();
               const domFoundTable = !!(domTarget && domTarget.tblId); // Track if DOM says we're in a table
               
               if (domFoundTable) {
@@ -3998,7 +4223,10 @@ exports.aceInitialized = (h, ctx) => {
                 }
               }
               
-              tableMetadata = getTableMetadataForLine(lineNum);
+              // Only fetch metadata if we didn't already set it via cursor recovery
+              if (!tableMetadata) {
+                tableMetadata = getTableMetadataForLine(lineNum);
+              }
               
               // DOM fallback: if metadata not found via attribute, try extracting from table element
               if (!tableMetadata || typeof tableMetadata.cols !== 'number') {
@@ -4094,6 +4322,8 @@ exports.aceInitialized = (h, ctx) => {
               snapshotMeta: tableMetadata ? { ...tableMetadata } : null,
               // CRITICAL: Track the original table line for recovery
               originalTableLine: originalTableLine,
+              // Track if cursor recovery was used for this composition
+              usedCursorRecovery,
             };
             
             // CRITICAL: Set module-level variable for postWriteCanonicalize to access
@@ -4113,6 +4343,7 @@ exports.aceInitialized = (h, ctx) => {
               originalTableLine,
               hasSnapshot: !!cellSnapshot,
               hasMeta: !!tableMetadata,
+              usedCursorRecovery,
             });
           }
         } catch (err) {
@@ -5627,6 +5858,12 @@ exports.aceInitialized = (h, ctx) => {
       const dataPreview = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
       logCompositionEvent('compositionend-desktop-fired', evt, { data: dataPreview });
 
+      // CRITICAL: Capture desktopComposition state NOW, before any async operations.
+      // The next compositionstart can fire before our requestAnimationFrame callback runs,
+      // which would overwrite desktopComposition and cause us to use the wrong state.
+      // This was causing Chinese text to be inserted in wrong cells when typing quickly.
+      const capturedComposition = desktopComposition ? { ...desktopComposition } : null;
+      
         // Prevent the immediate post-composition input commit from running; we pipeline instead
         suppressNextInputCommit = true;
       requestAnimationFrame(() => {
@@ -5636,14 +5873,14 @@ exports.aceInitialized = (h, ctx) => {
             // Check if compositionstart found a table (snapshotMeta set) or if DOM selection is in a table
             const domTargetCheck = getDomCellTargetFromSelection();
             const domIsInTable = !!(domTargetCheck && domTargetCheck.tblId);
-            const compositionFoundTable = !!(desktopComposition && desktopComposition.snapshotMeta);
+            const compositionFoundTable = !!(capturedComposition && capturedComposition.snapshotMeta);
             
             if (!compositionFoundTable && !domIsInTable) {
               // User is NOT editing in a table - let normal Etherpad handle this
               logCompositionEvent('compositionend-desktop-skipped-not-in-table', evt, {
                 compositionFoundTable,
                 domIsInTable,
-                lineNum: desktopComposition?.lineNum,
+                lineNum: capturedComposition?.lineNum,
               });
               return;
             }
@@ -5657,10 +5894,10 @@ exports.aceInitialized = (h, ctx) => {
             if (willCommit) suppressNextBeforeinputCommitOnce = true;
               const repNow = aceInstance.ace_getRep();
               const caret = repNow && repNow.selStart;
-              if (!caret && (desktopComposition && typeof desktopComposition.lineNum !== 'number')) return;
+              if (!caret && (capturedComposition && typeof capturedComposition.lineNum !== 'number')) return;
               // Prefer the line captured at compositionstart to avoid caret drift.
-              const pipelineLineNum = (desktopComposition && typeof desktopComposition.lineNum === 'number')
-                ? desktopComposition.lineNum
+              const pipelineLineNum = (capturedComposition && typeof capturedComposition.lineNum === 'number')
+                ? capturedComposition.lineNum
                 : caret[0];
             let metadata = getTableMetadataForLine(pipelineLineNum);
               let entry = repNow.lines.atIndex(pipelineLineNum);
@@ -5669,10 +5906,10 @@ exports.aceInitialized = (h, ctx) => {
               return;
             }
               // If tblId was captured at start, and current metadata doesn't match, relocate the line by tblId.
-              if (desktopComposition && desktopComposition.tblId) {
+              if (capturedComposition && capturedComposition.tblId) {
                 const currentTblId = metadata && metadata.tblId ? metadata.tblId : null;
-                if (currentTblId !== desktopComposition.tblId) {
-                  const relocatedLine = findLineNumByTblId(desktopComposition.tblId);
+                if (currentTblId !== capturedComposition.tblId) {
+                  const relocatedLine = findLineNumByTblId(capturedComposition.tblId);
                   if (relocatedLine >= 0) {
                     const relocatedEntry = repNow.lines.atIndex(relocatedLine);
                     if (relocatedEntry) {
@@ -5782,10 +6019,10 @@ exports.aceInitialized = (h, ctx) => {
               const cellsNow = (entry.text || '').split(DELIMITER);
               while (cellsNow.length < metadata.cols) cellsNow.push(' ');
               // Prefer the cell index captured at compositionstart; otherwise compute using RAW mapping.
-              let idx = (desktopComposition && desktopComposition.cellIndex >= 0)
-                ? desktopComposition.cellIndex
+              let idx = (capturedComposition && capturedComposition.cellIndex >= 0)
+                ? capturedComposition.cellIndex
                 : (() => {
-                    const selCol = (desktopComposition && desktopComposition.start) ? desktopComposition.start[1] : (caret ? caret[1] : 0);
+                    const selCol = (capturedComposition && capturedComposition.start) ? capturedComposition.start[1] : (caret ? caret[1] : 0);
                     const rawMap = computeTargetCellIndexFromRaw(entry, selCol);
                     return rawMap.index;
                   })();
@@ -5794,8 +6031,8 @@ exports.aceInitialized = (h, ctx) => {
             // Compute relative selection in cell
               let baseOffset = 0;
               for (let i = 0; i < idx; i++) baseOffset += (cellsNow[i]?.length ?? 0) + DELIMITER.length;
-              const sColAbs = (desktopComposition && desktopComposition.start) ? desktopComposition.start[1] : (caret ? caret[1] : 0);
-              const eColAbs = (desktopComposition && desktopComposition.end) ? desktopComposition.end[1] : sColAbs;
+              const sColAbs = (capturedComposition && capturedComposition.start) ? capturedComposition.start[1] : (caret ? caret[1] : 0);
+              const eColAbs = (capturedComposition && capturedComposition.end) ? capturedComposition.end[1] : sColAbs;
               const currentCellLenRaw = cellsNow[idx]?.length ?? 0;
               const sCol = Math.max(0, sColAbs - baseOffset);
               const eCol = Math.max(sCol, Math.min(eColAbs - baseOffset, currentCellLenRaw));
@@ -5811,6 +6048,50 @@ exports.aceInitialized = (h, ctx) => {
                     logTag: 'compositionend-desktop-pipeline-minimal',
                 aceInstance,
               });
+
+              // CRITICAL: After inserting text, explicitly position the cursor at the end of inserted text.
+              // This prevents the browser from moving the cursor to a wrong position during DOM re-renders.
+              // Also store this position for recovery in the next compositionstart.
+              try {
+                const repAfterInsert = aceInstance.ace_getRep();
+                const lineEntryAfter = repAfterInsert.lines.atIndex(pipelineLineNum);
+                const lineTextAfter = lineEntryAfter?.text || '';
+                const cellsAfter = lineTextAfter.split(DELIMITER);
+                
+                // Calculate where the cursor should be after insertion
+                let expectedBaseOffset = 0;
+                for (let i = 0; i < idx; i++) {
+                  expectedBaseOffset += (cellsAfter[i]?.length ?? 0) + DELIMITER.length;
+                }
+                // Position cursor at: start of cell + relative start + length of inserted text
+                const insertedTextLen = commitStr.length;
+                const expectedCursorCol = expectedBaseOffset + sCol + insertedTextLen;
+                
+                // Explicitly set the selection to the expected position
+                aceInstance.ace_performSelectionChange(
+                  [pipelineLineNum, expectedCursorCol],
+                  [pipelineLineNum, expectedCursorCol],
+                  false
+                );
+                
+                // Store the expected position for recovery in next compositionstart
+                desktopComposition._expectedCursor = {
+                  lineNum: pipelineLineNum,
+                  col: expectedCursorCol,
+                  cellIndex: idx,
+                  tblId: metadata.tblId,
+                  timestamp: Date.now(),
+                };
+                
+                console.debug('[ep_data_tables:compositionend] cursor positioned', {
+                  lineNum: pipelineLineNum,
+                  col: expectedCursorCol,
+                  cellIndex: idx,
+                  insertedLen: insertedTextLen,
+                });
+              } catch (cursorErr) {
+                console.debug('[ep_data_tables:compositionend] cursor positioning error', cursorErr?.message);
+              }
 
             // Post-composition orphan detection and repair using snapshot
             // This handles cases where the composition caused line fragmentation
@@ -5842,8 +6123,8 @@ exports.aceInitialized = (h, ctx) => {
                   const repPost = ace2.ace_getRep();
                   if (!repPost || !repPost.lines || !docManager) return;
                   
-                  const snapshotMeta = desktopComposition.snapshotMeta;
-                  const snapshotCells = desktopComposition.snapshot;
+                  const snapshotMeta = capturedComposition?.snapshotMeta;
+                  const snapshotCells = capturedComposition?.snapshot;
                   const targetTblId = snapshotMeta?.tblId || metadata?.tblId;
                   const targetRow = snapshotMeta?.row ?? metadata?.row ?? 0;
                   
@@ -7796,23 +8077,42 @@ exports.collectContentLineText = (hookName, context) => {
     const cells = Array.from(tr.children).map((td) => sanitize(td.innerText || '', cellHasImage(td)));
     const canonical = cells.join(DELIMITER);
     
-    // CRITICAL: Check if we actually need to emit canonical text
-    // If the existing line already has correct structure, DON'T emit canonical
-    // This preserves styling when browser extensions trigger re-collection without actual edits
-    // Canonical emission strips all character attributes (bold, font-size, author, images)!
+    // CRITICAL: Content collection for table rows
+    // 
+    // Key insight: We MUST emit canonical text for the first text node in a table row.
+    // Setting context.text = '' for the first text node causes a BLANK LINE.
+    // We can ONLY skip (context.text = '') for SUBSEQUENT text nodes after we've already emitted.
     //
-    // THREE OUTCOMES:
-    // 1. SKIP emit (structure verified matching) → preserves styling
-    // 2. EMIT canonical (structure verified mismatched) → fixes corruption, loses styling  
-    // 3. EMIT canonical (can't verify) → preserves structure, may lose styling, but line not deleted
+    // The _epDT_emittedCanonical flag tracks whether we've already emitted for this line.
+    // If flag is set → safe to skip (another text node already emitted canonical)
+    // If flag is NOT set → we MUST emit something or the line will be blank
+    //
+    // STRATEGY:
+    // 1. If we verified exact match → emit canonical (structure preserved, styling via capture+restore)
+    // 2. If we verified mismatch → emit canonical (fixes corruption, styling via capture+restore)
+    // 3. If we can't verify → emit canonical (safer than blank line, styling via capture+restore)
+    //
+    // In ALL cases, we capture styling before emit and restore after.
+    // This is the only way to preserve both structure AND styling.
     
-    let skipCanonical = false;
+    let verificationLineDiv = null; // Store for styling capture
+    let verificationResult = 'unverified'; // 'exact-match', 'structural-match', 'content-mismatch', 'cell-count-mismatch', 'unverified'
+    
+    // Get table metadata for cache key fallback (when lineId unavailable)
+    const tableTblId = table.getAttribute('data-tblId') || table.getAttribute('data-tblid') || '';
+    const tableRowAttr = table.getAttribute('data-row');
+    const cacheKeyFallback = tableTblId && tableRowAttr != null ? `${tableTblId}:${tableRowAttr}` : null;
     
     try {
-      const lineDiv = parentEl.closest && parentEl.closest('div.ace-line');
+      // Try parentEl first, then table (more reliable during composition)
+      let lineDiv = parentEl.closest && parentEl.closest('div.ace-line');
+      if (!lineDiv && table) {
+        lineDiv = table.closest('div.ace-line');
+      }
+      verificationLineDiv = lineDiv; // Save for later use
       const rep = cc && cc.rep;
       
-      // If we have full line context, compare structures
+      // Try to verify structure if we have context
       if (lineDiv && rep && rep.lines && typeof rep.lines.indexOfKey === 'function') {
         const lineIndex = rep.lines.indexOfKey(lineDiv.id);
         
@@ -7820,14 +8120,9 @@ exports.collectContentLineText = (hookName, context) => {
           const existingEntry = rep.lines.atIndex(lineIndex);
           const existingText = existingEntry?.text || '';
           
-          // FAST PATH: Exact match - no need to emit, styling is preserved
+          // FAST PATH: Exact match
           if (existingText === canonical) {
-            console.debug('[ep_data_tables:collector] SKIP emit (exact match, preserving styling)', {
-              lineId: lineDiv.id,
-              lineIndex,
-              cells: cells.length,
-            });
-            skipCanonical = true;
+            verificationResult = 'exact-match';
           } else {
             // STRUCTURAL CHECK: Compare cell-by-cell
             const existingCells = existingText.split(DELIMITER);
@@ -7845,58 +8140,93 @@ exports.collectContentLineText = (hookName, context) => {
               }
               
               if (isStructuralMatch) {
-                console.debug('[ep_data_tables:collector] SKIP emit (structural match, preserving styling)', {
-                  lineId: lineDiv.id,
-                  lineIndex,
-                  cells: cells.length,
-                });
-                skipCanonical = true;
+                verificationResult = 'structural-match';
               } else {
-                console.debug('[ep_data_tables:collector] emit needed (content mismatch)', {
-                  lineId: lineDiv.id,
-                  lineIndex,
-                  existingCellCount: existingCells.length,
-                  newCellCount: cells.length,
-                });
+                verificationResult = 'content-mismatch';
               }
             } else {
-              console.debug('[ep_data_tables:collector] emit needed (cell count mismatch)', {
-                lineId: lineDiv.id,
-                lineIndex,
-                existingCellCount: existingCells.length,
-                newCellCount: cells.length,
-              });
+              verificationResult = 'cell-count-mismatch';
             }
           }
         }
-        // If lineIndex invalid, fall through to emit canonical (safer than deleting line)
+        // If lineIndex invalid, verificationResult stays 'unverified'
       }
-      // If no line context, fall through to emit canonical (safer than deleting line)
+      // If no line context, verificationResult stays 'unverified'
     } catch (matchErr) {
-      // On error, fall through to emit canonical (safer than deleting line)
-      console.debug('[ep_data_tables:collector] structure check error', matchErr?.message);
+      // On error, verificationResult stays 'unverified'
+      console.debug('[ep_data_tables:collector] verification error (non-fatal)', matchErr?.message);
     }
     
-    if (skipCanonical) {
-      // Structure is intact - suppress this text node to avoid duplicate collection
-      // but do NOT suppress ALL text - only this one because we already have the content
-      if (state) state._epDT_emittedCanonical = true;
-      context.text = '';
-      return;
+    // Log verification result
+    console.debug('[ep_data_tables:collector] verification', {
+      result: verificationResult,
+      lineId: verificationLineDiv?.id?.slice(0, 15) || null,
+      cells: cells.length,
+    });
+    
+    // CRITICAL: Always capture styling BEFORE emitting canonical (which destroys it)
+    // We do this for ALL cases because canonical emission always strips styling
+    // 
+    // Cache key strategy:
+    // - Primary: lineId (magicdomidXXX) - fast lookup via rep.lines.indexOfKey
+    // - Fallback: tblId:row - used when lineId unavailable (during composition)
+    const cacheKey = (verificationLineDiv && verificationLineDiv.id) ? verificationLineDiv.id : cacheKeyFallback;
+    
+    if (verificationLineDiv || cacheKeyFallback) {
+      try {
+        const editorInfo = EP_DT_EDITOR_INFO;
+        if (editorInfo && typeof editorInfo.ep_data_tables_extractStyling === 'function') {
+          // Try to extract from verificationLineDiv, or from table directly
+          const extractTarget = verificationLineDiv || table.closest('div.ace-line') || table.parentElement;
+          const capturedStyling = editorInfo.ep_data_tables_extractStyling(extractTarget);
+          if (capturedStyling && capturedStyling.length > 0 && cacheKey) {
+            cacheStylingForLine(cacheKey, capturedStyling, cells);
+            
+            // Schedule styling restoration SYNCHRONOUSLY after collection cycle completes
+            // CRITICAL: Use setTimeout(fn, 0) to run immediately after the current call stack
+            // This ensures styling restoration happens BEFORE any changeset is sent to the server,
+            // so all changes (text + styling) are composed into a single changeset.
+            // 
+            // This mirrors how Chinese IME composition works - all changes are batched together.
+            // Using delayed async (150ms) caused socket disconnects because:
+            // 1. Text changeset was sent to server
+            // 2. Before ACK arrived, styling changeset was created
+            // 3. OT conflict occurred when composing changesets
+            const keyForRestore = cacheKey;
+            const tblIdForRestore = tableTblId;
+            const rowForRestore = tableRowAttr != null ? parseInt(tableRowAttr, 10) : 0;
+            
+            // setTimeout(fn, 0) runs after the current call stack (collection) completes,
+            // but BEFORE the changesetTracker's callback sends changes to the server
+            // (which also uses setTimeout(fn, 0) but is scheduled after this)
+            setTimeout(() => {
+              try {
+                if (editorInfo && typeof editorInfo.ep_data_tables_restoreCachedStyling === 'function') {
+                  editorInfo.ep_data_tables_restoreCachedStyling(keyForRestore, tblIdForRestore, rowForRestore);
+                }
+              } catch (restoreErr) {
+                console.debug('[ep_data_tables:collector] styling restore error (non-fatal)', restoreErr?.message);
+              }
+            }, 0);
+          }
+        }
+      } catch (captureErr) {
+        console.debug('[ep_data_tables:collector] styling capture error (non-fatal)', captureErr?.message);
+      }
     }
     
     // Emit canonical to preserve table structure (delimiters between cells)
-    // This may lose styling but at least preserves the table and its content
+    // Styling will be restored after collection via the scheduled restore
     context.text = canonical;
     
-    try {
-      const lineDiv = parentEl.closest && parentEl.closest('div.ace-line');
       console.debug('[ep_data_tables:collector] emit-canonical', {
-        lineId: lineDiv?.id || null,
+      lineId: verificationLineDiv?.id?.slice(0, 15) || null,
+      cacheKey: cacheKey?.slice(0, 20) || null,
         cells: cells.length,
-        textSample: canonical.slice(0, 80),
+      textSample: canonical.slice(0, 80),
+      verificationResult,
+      hasCachedStyling: cacheKey ? __epDT_pendingStylingForLine.has(cacheKey) : false,
       });
-    } catch (_) {}
 
     // Apply/refresh tbljson line attribute
     const tblId = table.getAttribute('data-tblId') || table.getAttribute('data-tblid') || '';
