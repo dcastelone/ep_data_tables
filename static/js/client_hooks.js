@@ -59,6 +59,28 @@ let __epDT_compositionOriginalLine = { tblId: null, lineNum: null, timestamp: 0 
 // Flag to prevent postWriteCanonicalize from interfering during column operations
 let __epDT_columnOperationInProgress = false;
 
+// CRITICAL: Track composition state to prevent aggressive suppression during IME input
+// When active, content suppression in collectContentLineText is more conservative
+let __epDT_compositionActive = false;
+let __epDT_lastCompositionEndTime = 0;
+const __epDT_COMPOSITION_COOLDOWN_MS = 500; // Wait 500ms after composition ends before aggressive suppression
+
+/**
+ * Check if we're in or recently exited a composition state.
+ * During composition, we should be more conservative about suppressing content.
+ * @returns {boolean} - True if composition is active or recently ended
+ */
+const isInCompositionCooldown = () => {
+  if (__epDT_compositionActive) return true;
+  if (__epDT_lastCompositionEndTime > 0) {
+    const elapsed = Date.now() - __epDT_lastCompositionEndTime;
+    if (elapsed < __epDT_COMPOSITION_COOLDOWN_MS) {
+      return true;
+    }
+  }
+  return false;
+};
+
 // CRITICAL: Flag indicating DOM is desynced from Etherpad's internal state
 // This is set when we detect keyToNodeMap errors (caused by browser extensions modifying DOM)
 // When true, ALL destructive operations (line deletions) are blocked to prevent data loss
@@ -4130,6 +4152,8 @@ exports.aceInitialized = (h, ctx) => {
 
       $inner.on('compositionstart', (evt) => {
         logCompositionEvent('compositionstart', evt);
+        // Set global composition flag to prevent aggressive suppression
+        __epDT_compositionActive = true;
         if (isAndroidUA() || isIOSUA()) return;
         try {
           const rep0 = ed.ace_getRep && ed.ace_getRep();
@@ -5719,6 +5743,8 @@ exports.aceInitialized = (h, ctx) => {
     });
 
     $inner.on('compositionstart', (evt) => {
+      // Set global composition flag (for Android path)
+      __epDT_compositionActive = true;
       if (!isAndroidUA()) return;
       const rep = ed.ace_getRep();
       if (!rep || !rep.selStart) return;
@@ -5843,6 +5869,10 @@ exports.aceInitialized = (h, ctx) => {
     });
 
     $inner.on('compositionend', (evt) => {
+      // Clear global composition flag and set cooldown timer (for Android path)
+      __epDT_compositionActive = false;
+      __epDT_lastCompositionEndTime = Date.now();
+
       if (isAndroidChromeComposition) {
         logCompositionEvent('compositionend-android-handler', evt);
         isAndroidChromeComposition = false;
@@ -5852,6 +5882,10 @@ exports.aceInitialized = (h, ctx) => {
     });
 
     $inner.on('compositionend', (evt) => {
+      // Clear global composition flag and set cooldown timer
+      __epDT_compositionActive = false;
+      __epDT_lastCompositionEndTime = Date.now();
+
       if (isAndroidUA() || isIOSUA()) return;
       const compLogPrefix = '[ep_data_tables:compositionEndDesktop]';
       const nativeEvt = evt.originalEvent || evt;
@@ -6350,31 +6384,112 @@ exports.aceInitialized = (h, ctx) => {
                     if (!isDestructiveOperationSafe('compositionend-orphan-repair orphan removal')) {
                       console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan removal (safe mode)');
                     } else {
+                    // FIX: Track deletion offset to adjust line numbers as we delete
+                    // When we delete a line, all subsequent line numbers shift down by 1
+                    // Since we sort bottom-up (highest first), we need to track how many
+                    // lines below each orphan have been deleted to adjust correctly
                     orphans.sort((a, b) => b.lineNum - a.lineNum);
                     let orphansRemoved = 0;
+                    let deletionOffset = 0; // Lines deleted so far
+
                     for (const orphan of orphans) {
                       try {
-                        // Re-fetch rep to get current line count (may have changed after previous deletions)
+                        // Re-fetch rep to get current state after previous deletions
                         const repCheck = ace2.ace_getRep();
-                        
-                        // Use comprehensive validation to prevent keyToNodeMap errors (IME/Grammarly)
-                        if (!isLineSafeToModify(repCheck, orphan.lineNum, '[ep_data_tables:compositionend-orphan-repair]')) {
+
+                        // Calculate adjusted line number accounting for deletions
+                        // Since we delete bottom-up, lines BELOW the current orphan may have been deleted
+                        // But since we go highest->lowest, deletions don't affect lines above
+                        const adjustedLineNum = orphan.lineNum;
+
+                        // Verify line still exists
+                        const totalLines = repCheck.lines.length();
+                        if (adjustedLineNum >= totalLines || adjustedLineNum < 0) {
+                          console.debug('[ep_data_tables:compositionend-orphan-repair] orphan line out of bounds, skipping', {
+                            orphanLine: orphan.lineNum,
+                            adjustedLine: adjustedLineNum,
+                            totalLines,
+                          });
                           continue;
                         }
-                        
+
+                        // Use comprehensive validation to prevent keyToNodeMap errors (IME/Grammarly)
+                        if (!isLineSafeToModify(repCheck, adjustedLineNum, '[ep_data_tables:compositionend-orphan-repair]')) {
+                          continue;
+                        }
+
+                        // CRITICAL FIX: Verify line content before deletion to prevent race condition
+                        // Check that this line still looks like an orphan (not the primary table line)
+                        const lineEntry = repCheck.lines.atIndex(adjustedLineNum);
+                        const currentLineText = lineEntry?.text || '';
+
+                        // Skip if this line is now empty (already cleaned up)
+                        if (!currentLineText.trim()) {
+                          console.debug('[ep_data_tables:compositionend-orphan-repair] line already empty, skipping', {
+                            adjustedLine: adjustedLineNum,
+                          });
+                          continue;
+                        }
+
+                        // Skip if this line no longer has table-related content (may have become primary)
+                        // Check if line has tbljson attribute matching our target table
+                        let lineAttr = null;
+                        try {
+                          lineAttr = docManager.getAttributeOnLine(adjustedLineNum, ATTR_TABLE_JSON);
+                        } catch (_) {}
+
+                        if (lineAttr) {
+                          try {
+                            const lineMeta = JSON.parse(lineAttr);
+                            // Verify this is still for our target table
+                            if (lineMeta.tblId !== targetTblId || lineMeta.row !== targetRow) {
+                              console.debug('[ep_data_tables:compositionend-orphan-repair] line has different table, skipping', {
+                                adjustedLine: adjustedLineNum,
+                                lineTblId: lineMeta.tblId,
+                                lineRow: lineMeta.row,
+                                targetTblId,
+                                targetRow,
+                              });
+                              continue;
+                            }
+                          } catch (_) {}
+                        }
+
+                        // Verify content similarity - the orphan text should match what we captured
+                        // Allow for minor differences due to composition, but catch major shifts
+                        const orphanOriginalText = orphan.text || '';
+                        const textSimilarity = (currentLineText.length > 0 && orphanOriginalText.length > 0)
+                          ? Math.min(currentLineText.length, orphanOriginalText.length) / Math.max(currentLineText.length, orphanOriginalText.length)
+                          : 0;
+
+                        // If text is drastically different (< 20% similar), this line may have changed
+                        // Skip deletion to prevent data loss
+                        if (orphanOriginalText.length > 0 && currentLineText.length > 0 && textSimilarity < 0.2) {
+                          console.warn('[ep_data_tables:compositionend-orphan-repair] line content changed significantly, skipping deletion', {
+                            adjustedLine: adjustedLineNum,
+                            originalLen: orphanOriginalText.length,
+                            currentLen: currentLineText.length,
+                            similarity: textSimilarity.toFixed(2),
+                          });
+                          continue;
+                        }
+
                       try {
                         if (docManager && typeof docManager.removeAttributeOnLine === 'function') {
-                          docManager.removeAttributeOnLine(orphan.lineNum, ATTR_TABLE_JSON);
+                          docManager.removeAttributeOnLine(adjustedLineNum, ATTR_TABLE_JSON);
                         }
                         } catch (attrErr) {
                           console.debug('[ep_data_tables:compositionend-orphan-repair] removeAttribute failed', attrErr);
                         }
-                        
+
                       console.debug('[ep_data_tables:compositionend-orphan-repair] removing orphan (merged)', {
                         orphanLine: orphan.lineNum,
+                        adjustedLine: adjustedLineNum,
+                        contentVerified: true,
                       });
-                      ace2.ace_performDocumentReplaceRange([orphan.lineNum, 0], [orphan.lineNum + 1, 0], '');
+                      ace2.ace_performDocumentReplaceRange([adjustedLineNum, 0], [adjustedLineNum + 1, 0], '');
                         orphansRemoved++;
+                        deletionOffset++; // Track that we deleted a line
                       } catch (orphanDeleteErr) {
                         console.error('[ep_data_tables:compositionend-orphan-repair] error deleting orphan line', {
                           orphanLine: orphan.lineNum,
@@ -7187,7 +7302,18 @@ exports.aceInitialized = (h, ctx) => {
       const tableLines = [];
       const totalLines = currentRep.lines.length();
 
-      for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+      // FIX: Optimized bidirectional search from clicked line
+      // Instead of scanning ALL lines, start from clicked line and expand outward
+      // Tables are typically contiguous, so we can stop when we hit non-table lines
+      const startLine = lastClick.lineNum;
+      const MAX_SEARCH_RADIUS = 200; // Maximum lines to search in each direction
+      let consecutiveNonTableUp = 0;
+      let consecutiveNonTableDown = 0;
+      const EARLY_TERMINATION_THRESHOLD = 5; // Stop if we hit 5 consecutive non-table lines
+
+      // Helper function to check a line and extract table metadata
+      const checkLineForTable = (lineIndex) => {
+        if (lineIndex < 0 || lineIndex >= totalLines) return null;
         try {
           let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
 
@@ -7207,7 +7333,6 @@ exports.aceInitialized = (h, ctx) => {
                       cols: domCells.length
                     };
                     lineAttrString = JSON.stringify(reconstructedMetadata);
-                   // log(`${funcName}: Reconstructed metadata from DOM for line ${lineIndex}: ${lineAttrString}`);
                   }
                 }
               }
@@ -7219,18 +7344,65 @@ exports.aceInitialized = (h, ctx) => {
             if (lineMetadata.tblId === lastClick.tblId) {
               const lineEntry = currentRep.lines.atIndex(lineIndex);
               if (lineEntry) {
-                tableLines.push({
+                return {
                   lineIndex,
                   row: lineMetadata.row,
                   cols: lineMetadata.cols,
                   lineText: lineEntry.text,
                   metadata: lineMetadata
-                });
+                };
               }
             }
           }
         } catch (e) {
-          continue;
+          // Ignore errors for individual lines
+        }
+        return null;
+      };
+
+      // Check the clicked line first
+      const clickedLineResult = checkLineForTable(startLine);
+      if (clickedLineResult) {
+        tableLines.push(clickedLineResult);
+      }
+
+      // Search upward and downward simultaneously
+      for (let offset = 1; offset <= MAX_SEARCH_RADIUS; offset++) {
+        // Check if we should stop early (found all rows or hit termination threshold)
+        const shouldStopUp = consecutiveNonTableUp >= EARLY_TERMINATION_THRESHOLD;
+        const shouldStopDown = consecutiveNonTableDown >= EARLY_TERMINATION_THRESHOLD;
+
+        if (shouldStopUp && shouldStopDown) {
+          console.debug(`[ep_data_tables] ${funcName}: Early termination - hit ${EARLY_TERMINATION_THRESHOLD} consecutive non-table lines in both directions`);
+          break;
+        }
+
+        // Search upward
+        if (!shouldStopUp) {
+          const upLine = startLine - offset;
+          if (upLine >= 0) {
+            const upResult = checkLineForTable(upLine);
+            if (upResult) {
+              tableLines.push(upResult);
+              consecutiveNonTableUp = 0; // Reset counter on finding a table line
+            } else {
+              consecutiveNonTableUp++;
+            }
+          }
+        }
+
+        // Search downward
+        if (!shouldStopDown) {
+          const downLine = startLine + offset;
+          if (downLine < totalLines) {
+            const downResult = checkLineForTable(downLine);
+            if (downResult) {
+              tableLines.push(downResult);
+              consecutiveNonTableDown = 0; // Reset counter on finding a table line
+            } else {
+              consecutiveNonTableDown++;
+            }
+          }
         }
       }
 
@@ -7240,7 +7412,7 @@ exports.aceInitialized = (h, ctx) => {
       }
 
       tableLines.sort((a, b) => a.row - b.row);
-     // log(`${funcName}: Found ${tableLines.length} table lines`);
+     // log(`${funcName}: Found ${tableLines.length} table lines (optimized search)`);
 
       const numRows = tableLines.length;
       const numCols = tableLines[0].cols;
@@ -7987,6 +8159,20 @@ exports.collectContentLineText = (hookName, context) => {
         } catch (_) {}
         
         // There IS a table on this line, but this span is outside it - THAT's a true orphan, suppress
+        // FIX: During composition (IME input), be more conservative about suppression
+        // to avoid accidentally discarding text the user is actively typing
+        if (isInCompositionCooldown()) {
+          console.debug('[ep_data_tables:collector] skipping orphan suppression (composition cooldown)', {
+            compositionActive: __epDT_compositionActive,
+            timeSinceCompositionEnd: __epDT_lastCompositionEndTime > 0 ? Date.now() - __epDT_lastCompositionEndTime : -1,
+            detectedClass,
+            originalText: node.nodeValue?.slice(0, 50),
+          });
+          // During composition, let the text through - it may be valid input
+          // The orphan repair mechanism will clean up after composition ends
+          return;
+        }
+
         context.text = '';
         try {
           const lineDiv = parentEl.closest('div.ace-line');
@@ -8011,6 +8197,18 @@ exports.collectContentLineText = (hookName, context) => {
           if (tableInLine) {
             // This ace-line has a table, but this text node is NOT inside the table
             // This is stray content that would corrupt the table - suppress it
+            // FIX: During composition (IME input), be more conservative about suppression
+            if (isInCompositionCooldown()) {
+              console.debug('[ep_data_tables:collector] skipping non-table content suppression (composition cooldown)', {
+                compositionActive: __epDT_compositionActive,
+                lineId: lineDiv.id || null,
+                originalText: node.nodeValue?.slice(0, 50),
+                tblId: tableInLine.getAttribute('data-tblId') || tableInLine.getAttribute('data-tblid'),
+              });
+              // During composition, let the text through - it may be valid IME input
+              return;
+            }
+
             context.text = '';
             console.debug('[ep_data_tables:collector] SUPPRESSED non-table content in table line', {
               lineId: lineDiv.id || null,
@@ -8506,18 +8704,25 @@ const finishColumnResize = (editorInfo, docManager) => {
       const tableLines = [];
       const totalLines = rep.lines.length();
 
-      for (let lineIndex = 0; lineIndex < totalLines; lineIndex++) {
+      // FIX: Optimized bidirectional search from resize line
+      // Instead of scanning ALL lines, start from the resize line and expand outward
+      const startLine = resizeLineNum >= 0 ? resizeLineNum : 0;
+      const MAX_SEARCH_RADIUS = 200;
+      let consecutiveNonTableUp = 0;
+      let consecutiveNonTableDown = 0;
+      const EARLY_TERMINATION_THRESHOLD = 5;
+
+      // Helper function to check a line for table metadata
+      const checkLineForTableResize = (lineIndex) => {
+        if (lineIndex < 0 || lineIndex >= totalLines) return null;
         try {
           let lineAttrString = docManager.getAttributeOnLine(lineIndex, ATTR_TABLE_JSON);
 
           if (lineAttrString) {
             const lineMetadata = JSON.parse(lineAttrString);
             if (lineMetadata.tblId === resizeTableMetadata.tblId) {
-              tableLines.push({
-                lineIndex,
-                metadata: lineMetadata
-              });
-              }
+              return { lineIndex, metadata: lineMetadata };
+            }
           } else {
             const lineEntry = rep.lines.atIndex(lineIndex);
             if (lineEntry && lineEntry.lineNode) {
@@ -8545,22 +8750,59 @@ const finishColumnResize = (editorInfo, docManager) => {
                       cols: domCells.length,
                       columnWidths: columnWidths
                     };
-                   // log(`${callWithAceLogPrefix}: Reconstructed metadata from DOM for line ${lineIndex}:`, reconstructedMetadata);
-                    tableLines.push({
-                      lineIndex,
-                      metadata: reconstructedMetadata
-                    });
+                    return { lineIndex, metadata: reconstructedMetadata };
                   }
                 }
               }
             }
-                  }
-              } catch (e) {
-          continue;
+          }
+        } catch (e) {
+          // Ignore errors for individual lines
+        }
+        return null;
+      };
+
+      // Check the starting line first
+      const startResult = checkLineForTableResize(startLine);
+      if (startResult) {
+        tableLines.push(startResult);
+      }
+
+      // Bidirectional search
+      for (let offset = 1; offset <= MAX_SEARCH_RADIUS; offset++) {
+        const shouldStopUp = consecutiveNonTableUp >= EARLY_TERMINATION_THRESHOLD;
+        const shouldStopDown = consecutiveNonTableDown >= EARLY_TERMINATION_THRESHOLD;
+
+        if (shouldStopUp && shouldStopDown) break;
+
+        if (!shouldStopUp) {
+          const upLine = startLine - offset;
+          if (upLine >= 0) {
+            const upResult = checkLineForTableResize(upLine);
+            if (upResult) {
+              tableLines.push(upResult);
+              consecutiveNonTableUp = 0;
+            } else {
+              consecutiveNonTableUp++;
+            }
+          }
+        }
+
+        if (!shouldStopDown) {
+          const downLine = startLine + offset;
+          if (downLine < totalLines) {
+            const downResult = checkLineForTableResize(downLine);
+            if (downResult) {
+              tableLines.push(downResult);
+              consecutiveNonTableDown = 0;
+            } else {
+              consecutiveNonTableDown++;
+            }
+          }
         }
       }
 
-     // log(`${callWithAceLogPrefix}: Found ${tableLines.length} table lines to update`);
+     // log(`${callWithAceLogPrefix}: Found ${tableLines.length} table lines to update (optimized search)`);
 
       for (const tableLine of tableLines) {
         const updatedMetadata = { ...tableLine.metadata, columnWidths: finalWidths };
