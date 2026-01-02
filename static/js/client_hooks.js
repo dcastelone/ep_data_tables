@@ -2601,12 +2601,18 @@ exports.aceInitialized = (h, ctx) => {
             let originalTableLine = null; // Track where the table actually is
             
             // Recover cursor if browser moved it to wrong line between compositions
+            // CONSERVATIVE: More validation, shorter timeout, always clear after check
             let usedCursorRecovery = false;
             if (desktopComposition && desktopComposition._expectedCursor) {
               const stored = desktopComposition._expectedCursor;
               const timeSinceStored = Date.now() - stored.timestamp;
               
-              if (timeSinceStored < 1000) {
+              // Reduced timeout from 1000ms to 500ms for rapid typing safety
+              const isFresh = timeSinceStored < 500;
+              const sameTable = stored.tblId && tableMetadata && stored.tblId === tableMetadata.tblId;
+              const reasonableLineDelta = typeof stored.lineNum === 'number' && Math.abs(lineNum - stored.lineNum) <= 1;
+              
+              if (isFresh && sameTable && reasonableLineDelta) {
                 const currentLine = lineNum;
                 const expectedLine = stored.lineNum;
                 const expectedCell = stored.cellIndex;
@@ -2615,26 +2621,35 @@ exports.aceInitialized = (h, ctx) => {
                 const seemsWrong = lineChanged && (currentLine === expectedLine + 1);
                 
                 if (seemsWrong) {
-                  const storedMeta = getTableMetadataForLine(expectedLine);
-                  if (storedMeta && storedMeta.tblId === stored.tblId) {
-                    lineNum = expectedLine;
-                    cellIndex = expectedCell;
-                    tableMetadata = storedMeta;
-                    originalTableLine = expectedLine;
-                    usedCursorRecovery = true;
+                  // Additional validation: verify stored position is still valid
+                  try {
+                    const storedEntry = rep0.lines.atIndex(expectedLine);
+                    const storedText = storedEntry?.text || '';
+                    const storedCells = storedText.split(DELIMITER);
                     
-                    try {
-                      ed.ace_callWithAce((aceInstance) => {
-                        aceInstance.ace_performSelectionChange([expectedLine, stored.col], [expectedLine, stored.col], false);
-                      }, 'compositionstart-cursor-recovery', true);
-                    } catch (_) {}
-                  }
+                    // Only recover if cell structure matches expectations
+                    if (expectedCell >= 0 && expectedCell < storedCells.length) {
+                      const storedMeta = getTableMetadataForLine(expectedLine);
+                      if (storedMeta && storedMeta.tblId === stored.tblId) {
+                        lineNum = expectedLine;
+                        cellIndex = expectedCell;
+                        tableMetadata = storedMeta;
+                        originalTableLine = expectedLine;
+                        usedCursorRecovery = true;
+                        
+                        try {
+                          ed.ace_callWithAce((aceInstance) => {
+                            aceInstance.ace_performSelectionChange([expectedLine, stored.col], [expectedLine, stored.col], false);
+                          }, 'compositionstart-cursor-recovery', true);
+                        } catch (_) {}
+                      }
+                    }
+                  } catch (_) { /* validation failed, don't recover */ }
                 }
               }
               
-              if (timeSinceStored > 1000 || usedCursorRecovery) {
-                delete desktopComposition._expectedCursor;
-              }
+              // ALWAYS clear after checking to prevent stale reuse
+              delete desktopComposition._expectedCursor;
             }
             
             try {
@@ -4081,12 +4096,29 @@ exports.aceInitialized = (h, ctx) => {
       const dataPreview = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
       logCompositionEvent('compositionend-desktop-fired', evt, { data: dataPreview });
 
-      // Capture desktopComposition state before async ops
-      // which would overwrite desktopComposition and cause us to use the wrong state.
-      const capturedComposition = desktopComposition ? { ...desktopComposition } : null;
-      
-        // Prevent the immediate post-composition input commit from running; we pipeline instead
-        suppressNextInputCommit = true;
+      // CRITICAL: Capture composition state with DEEP COPY before async deferral.
+      // This prevents race conditions where a new compositionstart overwrites state
+      // before this callback executes. Deep copy all arrays to prevent shared references.
+      const capturedComposition = desktopComposition
+        ? {
+            active: desktopComposition.active,
+            start: desktopComposition.start ? desktopComposition.start.slice() : null,
+            end: desktopComposition.end ? desktopComposition.end.slice() : null,
+            lineNum: desktopComposition.lineNum,
+            cellIndex: desktopComposition.cellIndex,
+            tblId: desktopComposition.tblId,
+            snapshot: desktopComposition.snapshot ? desktopComposition.snapshot.slice() : null,
+            snapshotMeta: desktopComposition.snapshotMeta ? { ...desktopComposition.snapshotMeta } : null,
+            originalTableLine: desktopComposition.originalTableLine,
+            usedCursorRecovery: desktopComposition.usedCursorRecovery,
+          }
+        : null;
+
+      // Capture the commit string synchronously too (before any async deferral)
+      const commitStrRawSync = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
+
+      // Prevent the immediate post-composition input commit from running; we pipeline instead
+      suppressNextInputCommit = true;
       requestAnimationFrame(() => {
         try {
           ed.ace_callWithAce((aceInstance) => {
@@ -4106,12 +4138,12 @@ exports.aceInitialized = (h, ctx) => {
               return;
             }
             
-            // Pipeline: Apply committed IME string synchronously to the target cell
-            const commitStrRaw = typeof nativeEvt?.data === 'string' ? nativeEvt.data : '';
-            const commitStr = sanitizeCellContent(commitStrRaw || '');
+            // Pipeline: Apply committed IME string to the target cell
+            // Use the synchronously captured commit string (commitStrRawSync) to avoid race conditions
+            const commitStr = sanitizeCellContent(commitStrRawSync || '');
             // Only suppress the next beforeinput commit if the IME provided a non-empty commit string.
             // Normalize using the same soft-whitespace rules the editor uses.
-            const willCommit = typeof commitStrRaw === 'string' && normalizeSoftWhitespace(commitStrRaw).trim().length > 0;
+            const willCommit = typeof commitStrRawSync === 'string' && normalizeSoftWhitespace(commitStrRawSync).trim().length > 0;
             if (willCommit) suppressNextBeforeinputCommitOnce = true;
               const repNow = aceInstance.ace_getRep();
               const caret = repNow && repNow.selStart;
@@ -4239,15 +4271,44 @@ exports.aceInitialized = (h, ctx) => {
             }
               const cellsNow = (entry.text || '').split(DELIMITER);
               while (cellsNow.length < metadata.cols) cellsNow.push(' ');
-              // Prefer the cell index captured at compositionstart; otherwise compute using RAW mapping.
-              let idx = (capturedComposition && capturedComposition.cellIndex >= 0)
-                ? capturedComposition.cellIndex
-                : (() => {
-                    const selCol = (capturedComposition && capturedComposition.start) ? capturedComposition.start[1] : (caret ? caret[1] : 0);
-                    const rawMap = computeTargetCellIndexFromRaw(entry, selCol);
-                    return rawMap.index;
-                  })();
-            if (idx < 0) idx = Math.min(metadata.cols - 1, 0);
+              
+              // DEFENSIVE CELL INDEX RESOLUTION:
+              // 1. Prefer the cell index captured at compositionstart
+              // 2. Fall back to live DOM selection (authoritative for current cursor)
+              // 3. Fall back to raw line text mapping using current caret
+              // 4. Final fallback: first cell (ensures we never lose text)
+              let idx = -1;
+              
+              // Strategy 1: Use captured cell index from compositionstart
+              if (capturedComposition && capturedComposition.cellIndex >= 0) {
+                idx = capturedComposition.cellIndex;
+              }
+              
+              // Strategy 2: Use live DOM selection as authoritative source
+              if (idx < 0) {
+                try {
+                  const liveDomTarget = getDomCellTargetFromSelection();
+                  if (liveDomTarget && typeof liveDomTarget.idx === 'number' && liveDomTarget.idx >= 0) {
+                    idx = liveDomTarget.idx;
+                  }
+                } catch (_) { /* ignore DOM errors */ }
+              }
+              
+              // Strategy 3: Compute from raw line text using captured or current caret
+              if (idx < 0) {
+                try {
+                  const selCol = (capturedComposition && capturedComposition.start) 
+                    ? capturedComposition.start[1] 
+                    : (caret ? caret[1] : 0);
+                  const rawMap = computeTargetCellIndexFromRaw(entry, selCol);
+                  if (rawMap.index >= 0) idx = rawMap.index;
+                } catch (_) { /* ignore */ }
+              }
+              
+              // Strategy 4: Final fallback - first cell (ensures no data loss)
+              if (idx < 0) idx = 0;
+              // Clamp to valid range
+              if (idx >= metadata.cols) idx = metadata.cols - 1;
 
             // Compute relative selection in cell
               let baseOffset = 0;
@@ -4314,7 +4375,21 @@ exports.aceInitialized = (h, ctx) => {
               }
 
             // Post-composition orphan detection and repair using snapshot
+            // Capture timestamp for staleness check
+            const orphanRepairScheduledAt = Date.now();
             setTimeout(() => {
+              // GUARD: Skip if a new composition started since we scheduled this
+              // This prevents concurrent document modifications during rapid typing
+              if (__epDT_compositionActive) {
+                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - new composition active');
+                return;
+              }
+              // Also skip if another composition just ended (within 30ms)
+              if (Date.now() - __epDT_lastCompositionEndTime < 30 && __epDT_lastCompositionEndTime > orphanRepairScheduledAt) {
+                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - very recent composition end');
+                return;
+              }
+              
               // Pre-check editor state
               // (keyToNodeMap.get(...) is undefined error)
               try {
@@ -4686,7 +4761,10 @@ exports.aceInitialized = (h, ctx) => {
               }
             }, 50); // Small delay to let Etherpad process the cell edit first
 
+            // Reset composition state but PRESERVE _expectedCursor for next compositionstart
+            const preservedCursor = desktopComposition._expectedCursor;
             desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1, snapshot: null, snapshotMeta: null };
+            if (preservedCursor) desktopComposition._expectedCursor = preservedCursor;
           }, 'tableDesktopCompositionEnd');
         } catch (compositionErr) {
           console.error(`${compLogPrefix} ERROR during desktop composition repair:`, compositionErr);
