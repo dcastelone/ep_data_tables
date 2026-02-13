@@ -28,9 +28,70 @@ exports.postAceInit = (hook, ctx) => {
 
   function position(el, target, dx = 0, dy = 0) {
     // log('position: Calculating position for', el, 'relative to', target);
-    const p = target.offset();
-    el.css({ left: p.left + dx, top: p.top + dy });
-    // log('position: Set position:', { left: p.left + dx, top: p.top + dy });
+    
+    // Use getBoundingClientRect for more reliable positioning with zoom
+    const targetRect = target[0].getBoundingClientRect();
+    
+    // Calculate initial desired position (viewport-relative since we use fixed positioning)
+    let left = targetRect.left + dx;
+    let top = targetRect.top + dy;
+    
+    // Make element visible temporarily to measure its dimensions
+    const wasHidden = el.css('display') === 'none';
+    if (wasHidden) {
+      el.css({ visibility: 'hidden', display: 'block' });
+    }
+    
+    const elWidth = el.outerWidth();
+    const elHeight = el.outerHeight();
+    
+    if (wasHidden) {
+      el.css({ visibility: '', display: 'none' });
+    }
+    
+    // Get viewport dimensions
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
+    // Padding from viewport edges
+    const edgePadding = 8;
+    
+    // Check and adjust for right edge overflow
+    if (left + elWidth > viewportWidth - edgePadding) {
+      // Try positioning to the left of the target instead
+      const leftAlternative = targetRect.right - elWidth - dx;
+      if (leftAlternative >= edgePadding) {
+        left = leftAlternative;
+      } else {
+        // If that doesn't work either, just pin to the right edge
+        left = viewportWidth - elWidth - edgePadding;
+      }
+    }
+    
+    // Ensure we don't go past the left edge
+    if (left < edgePadding) {
+      left = edgePadding;
+    }
+    
+    // Check and adjust for bottom edge overflow
+    if (top + elHeight > viewportHeight - edgePadding) {
+      // Try positioning above the target instead
+      const topAlternative = targetRect.top - elHeight;
+      if (topAlternative >= edgePadding) {
+        top = topAlternative;
+      } else {
+        // If that doesn't work either, just pin to the bottom edge
+        top = viewportHeight - elHeight - edgePadding;
+      }
+    }
+    
+    // Ensure we don't go past the top edge
+    if (top < edgePadding) {
+      top = edgePadding;
+    }
+    
+    el.css({ left: left, top: top });
+    // log('position: Set position:', { left, top });
   }
 
   // ───────────────────── init once DOM is ready ─────────────────────
