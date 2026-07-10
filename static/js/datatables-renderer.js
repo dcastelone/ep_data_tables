@@ -10,6 +10,27 @@ const log = (...m) => console.debug('[ep_data_tables:datatables-renderer]', ...m
 const DELIMITER = '\u241F';
 const HIDDEN_DELIM = DELIMITER;
 
+const enhanceTableHtml = (html, metadata = {}) => {
+  if (typeof document === 'undefined') return html;
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const table = template.content.querySelector('table.dataTable');
+  if (!table || typeof table.querySelectorAll !== 'function') return html;
+  table.setAttribute('data-ep-data-tables-accessible', 'true');
+  table.setAttribute('aria-label', `Table row ${(Number(metadata.row) || 0) + 1}`);
+  Array.from(table.querySelectorAll('td, th')).forEach((cell, index) => {
+    cell.setAttribute('aria-colindex', String(index + 1));
+  });
+  for (const delimiter of table.querySelectorAll('.ep-data_tables-delim, .ep-data_tables-caret-anchor')) {
+    delimiter.setAttribute('aria-hidden', 'true');
+  }
+  for (const handle of table.querySelectorAll('.ep-data_tables-resize-handle')) {
+    handle.setAttribute('aria-hidden', 'true');
+    handle.setAttribute('tabindex', '-1');
+  }
+  return template.innerHTML;
+};
+
 const enc = (s) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_');
 const dec = (s) => {
   const str = s.replace(/-/g, '+').replace(/_/g, '/');
@@ -153,7 +174,8 @@ const buildTimesliderHtml = (metadata, innerHTMLSegments) => {
   }).join('');
 
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
-  return `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
+  const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
+  return enhanceTableHtml(tableHtml, metadata);
 };
 
 const renderTimesliderLine = (line) => {

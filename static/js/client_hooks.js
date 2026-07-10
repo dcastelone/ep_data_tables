@@ -1,4 +1,5 @@
 const ATTR_TABLE_JSON = 'tbljson';
+const {enhanceTableHtml} = require('./accessibility');
 if (typeof window !== 'undefined') {
   if (window.__epDataTablesLoaded) {
     console.debug('[ep_data_tables] Duplicate client_hooks.js load suppressed');
@@ -639,7 +640,7 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
 
   const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
-  return tableHtml;
+  return enhanceTableHtml(tableHtml, metadata);
 }
 
 // acePostWriteDomLineHTML: Render table from delimiter-separated text
@@ -6693,7 +6694,6 @@ exports.aceUndoRedo = (hook, ctx) => {
     console.error(`${logPrefix} Error during undo/redo validation:`, e);
   }
 };
-
 
 
 

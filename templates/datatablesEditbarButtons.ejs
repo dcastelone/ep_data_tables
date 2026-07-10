@@ -4,43 +4,45 @@
   <!-- just a button, no nested <a> -->
   <button title="Table"
           class="buttonicon buttonicon-table"
+          aria-label="Table"
+          aria-controls="table-context-menu"
           aria-haspopup="true"
           aria-expanded="false"></button>
 </li>
 
 <!-- context menu -->
-<nav id="table-context-menu" class="table-context-menu" role="menu">
+<nav id="table-context-menu" class="table-context-menu" role="menu" aria-label="Table options">
   <ul role="none">
-    <li class="menu-item" id="tbl_prop_create_table" role="menuitem">
-      <a href="#create-table-container" data-l10n-id="ep_data_tables.menuCreateTable">Insert Table</a>
+    <li class="menu-item" role="none">
+      <a id="tbl_prop_create_table" href="#create-table-container" role="menuitem" aria-haspopup="grid" aria-controls="create-table-container" data-l10n-id="ep_data_tables.menuCreateTable">Insert Table</a>
     </li>
   </ul>
 
   <ul role="none">
-    <li class="menu-item" data-action="addTblRowA"><a href="#" data-l10n-id="ep_data_tables.menuInsertRowAbove">Insert Row Above</a></li>
-    <li class="menu-item" data-action="addTblRowB"><a href="#" data-l10n-id="ep_data_tables.menuInsertRowBelow">Insert Row Below</a></li>
-    <li class="menu-item" data-action="addTblColL"><a href="#" data-l10n-id="ep_data_tables.menuInsertColumnLeft">Insert Column Left</a></li>
-    <li class="menu-item" data-action="addTblColR"><a href="#" data-l10n-id="ep_data_tables.menuInsertColumnRight">Insert Column Right</a></li>
+    <li class="menu-item" role="none" data-action="addTblRowA"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertRowAbove">Insert Row Above</a></li>
+    <li class="menu-item" role="none" data-action="addTblRowB"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertRowBelow">Insert Row Below</a></li>
+    <li class="menu-item" role="none" data-action="addTblColL"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertColumnLeft">Insert Column Left</a></li>
+    <li class="menu-item" role="none" data-action="addTblColR"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertColumnRight">Insert Column Right</a></li>
   </ul>
 
   <ul role="none">
-    <li class="menu-item" data-action="delTblRow"><a href="#" data-l10n-id="ep_data_tables.menuDeleteRow">Delete Row</a></li>
-    <li class="menu-item" data-action="delTblCol"><a href="#" data-l10n-id="ep_data_tables.menuDeleteColumn">Delete Column</a></li>
+    <li class="menu-item" role="none" data-action="delTblRow"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuDeleteRow">Delete Row</a></li>
+    <li class="menu-item" role="none" data-action="delTblCol"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuDeleteColumn">Delete Column</a></li>
   </ul>
 
   <ul role="none">
-    <li class="menu-item" id="tbl_prop_menu_hide"><a href="#" data-l10n-id="ep_data_tables.menuCloseThisMenu">Close Menu</a></li>
+    <li class="menu-item" role="none"><a href="#" id="tbl_prop_menu_hide" role="menuitem" data-l10n-id="ep_data_tables.menuCloseThisMenu">Close Menu</a></li>
   </ul>
 
   <!-- table-size chooser -->
-  <div id="create-table-container" class="table-context-menu">
-    <div id="new-table-size">1 X 1</div>
-    <table id="new-table-size-selector">
+  <div id="create-table-container" class="table-context-menu" role="group" aria-label="Choose table size">
+    <div id="new-table-size" aria-live="polite">1 X 1</div>
+    <table id="new-table-size-selector" role="grid" aria-label="Table size">
       <tbody>
         <% for (let i = 1; i <= 30; i++) { %>
-        <tr>
+        <tr role="row">
           <% for (let j = 1; j <= 10; j++) { %>
-            <td tabindex="-1"></td>
+            <td role="gridcell" tabindex="-1" aria-selected="false" aria-label="<%= j %> columns by <%= i %> rows"></td>
           <% } %>
         </tr>
         <% } %>

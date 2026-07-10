@@ -1,6 +1,7 @@
 /* global $ */
 
 const log = (...m) => console.debug('[ep_data_tables:initialisation]', ...m);
+const {setupMenuAccessibility} = require('./accessibility');
 
 // NEW: Helper function to get line number (adapted from ep_image_insert)
 // Needs to be defined before being used in the mousedown handler
@@ -104,6 +105,21 @@ exports.postAceInit = (hook, ctx) => {
     $menu.add($gridWrap).appendTo('body').hide();
       // log('postAceInit: setTimeout - Moved popups to body.');
 
+    const createTable = (rows, cols) => {
+      ctx.ace.callWithAce((ace) => {
+        ace.ace_createTableViaAttributes(rows, cols);
+      }, 'tblCreate', true);
+    };
+    const tableA11y = setupMenuAccessibility({
+      $,
+      menu: $menu,
+      gridWrap: $gridWrap,
+      gridCells: $gridCells,
+      sizeText: $sizeText,
+      toolbarButton: $toolbarBtn,
+      createTable,
+    });
+
     // grid hover: live update highlight & label
     $gridCells.hover(function () {
       const cell = $(this);
@@ -127,6 +143,7 @@ exports.postAceInit = (hook, ctx) => {
       position($menu, $toolbarBtn, 0, $toolbarBtn.outerHeight());
       $menu.toggle();
       $gridWrap.hide();
+      tableA11y.syncMenuState();
         // log('Toolbar Button Click: END - Toggled menu visibility:', $menu.is(':visible'));
     });
 
@@ -156,13 +173,10 @@ exports.postAceInit = (hook, ctx) => {
         // log('Grid Cell Click: START');
       const [cols, rows] = $sizeText.text().split(' X ').map(n => parseInt(n, 10));
         // log('Grid Cell Click: Parsed size:', { cols, rows });
-      ctx.ace.callWithAce((ace) => {
-          // log('Grid Cell Click: Calling ace.ace_createTableViaAttributes...');
-        ace.ace_createTableViaAttributes(rows, cols);
-          // log('Grid Cell Click: ace.ace_createTableViaAttributes call finished.');
-      }, 'tblCreate', true);
+      createTable(rows, cols);
       $menu.hide();
       $gridWrap.hide();
+      tableA11y.syncMenuState();
         // log('Grid Cell Click: END - Hid menus.');
     });
 
@@ -180,6 +194,7 @@ exports.postAceInit = (hook, ctx) => {
             // log('Menu Item Click: ace.ace_doDatatableOptions call finished.');
         }, 'tblOptions', true);
         $menu.hide();
+        tableA11y.syncMenuState();
           // log('Menu Item Click: END - Hid menu.');
       });
 
@@ -188,6 +203,7 @@ exports.postAceInit = (hook, ctx) => {
       e.preventDefault();
       e.stopPropagation();
       $menu.hide();
+      tableA11y.syncMenuState();
     });
 
     // global click closes pop‑ups when clicking outside
@@ -195,6 +211,7 @@ exports.postAceInit = (hook, ctx) => {
       if (!$(e.target).closest('#table-context-menu, #table-menu-button, #create-table-container').length) {
         $menu.hide();
         $gridWrap.hide();
+        tableA11y.syncMenuState();
       }
     });
 
@@ -263,17 +280,9 @@ exports.postAceInit = (hook, ctx) => {
                         // log(`[ep_data_tables mousedown] Clicked cell (SUCCESS): Line=${lineNum}, TblId=${tblId}, CellIndex=${cellIndex}`);
                         // Store info on the shared ace editor object
                         ace.editor.ep_data_tables_last_clicked = { lineNum, cellIndex, tblId };
-
-                        // Visual feedback (Keep this for now)
-                        // --- TEST: Comment out class manipulation ---
-                        // tableElement.find('td.selected-table-cell').removeClass('selected-table-cell');
-                        // tdElement.addClass('selected-table-cell');
-                        // log('[ep_data_tables mousedown] TEST: Skipped adding/removing selected-table-cell class');
                     } else {
                         console.warn('[ep_data_tables mousedown] Could not reliably get cell info (FAIL).', {tblId, cellIndex, lineNum});
                         ace.editor.ep_data_tables_last_clicked = null; // Clear shared state
-                        // --- TEST: Comment out class manipulation (for consistency on failure) ---
-                        // $inner.find('td.selected-table-cell').removeClass('selected-table-cell');
                     }
                 } else {
                      // log('[ep_data_tables mousedown] Click was not within a valid TD/TR/TABLE/LINEDIV structure (FAIL).');
@@ -286,8 +295,6 @@ exports.postAceInit = (hook, ctx) => {
                     if (ace.editor.ep_data_tables_last_clicked) { 
                         // log('[ep_data_tables mousedown] Clicked outside table, clearing cell info.');
                         ace.editor.ep_data_tables_last_clicked = null;
-                        // --- TEST: Comment out class manipulation ---
-                        // $inner.find('td.selected-table-cell').removeClass('selected-table-cell');
                     }
                 }
             });
