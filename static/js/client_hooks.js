@@ -646,6 +646,9 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
 exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   const funcName = 'acePostWriteDomLineHTML';
   const node = args?.node;
+  if (!node || typeof node.querySelector !== 'function' || typeof node.querySelectorAll !== 'function') {
+    return cb();
+  }
   const nodeId = node?.id;
   
   let lineNum = -1;
@@ -6690,7 +6693,6 @@ exports.aceUndoRedo = (hook, ctx) => {
     console.error(`${logPrefix} Error during undo/redo validation:`, e);
   }
 };
-
 
 
 
