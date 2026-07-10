@@ -9,7 +9,6 @@
 const log = (...m) => console.debug('[ep_data_tables:datatables-renderer]', ...m);
 const DELIMITER = '\u241F';
 const HIDDEN_DELIM = DELIMITER;
-
 const enhanceTableHtml = (html, metadata = {}) => {
   if (typeof document === 'undefined') return html;
   const template = document.createElement('template');
@@ -180,10 +179,16 @@ const buildTimesliderHtml = (metadata, innerHTMLSegments) => {
 
 const renderTimesliderLine = (line) => {
   if (!line || typeof line.querySelectorAll !== 'function') return false;
-  if (line.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]')) return false;
+  if (line.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]')) {
+    line.classList.remove('ep-data_tables-timeslider-pending');
+    return false;
+  }
 
   const encodedJsonString = findTbljsonEncodedMetadata(line);
-  if (!encodedJsonString) return false;
+  if (!encodedJsonString) {
+    line.classList.remove('ep-data_tables-timeslider-pending');
+    return false;
+  }
 
   let metadata;
   try {
@@ -203,8 +208,28 @@ const renderTimesliderLine = (line) => {
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
 
   line.innerHTML = buildTimesliderHtml(metadata, htmlSegments);
+  line.classList.remove('ep-data_tables-timeslider-pending');
   line.classList.add('ep-data_tables-timeslider-rendered');
   return true;
+};
+
+const markPendingTimesliderTables = (root = document) => {
+  const body = root.querySelector ? (root.querySelector('#innerdocbody') || root) : root;
+  if (!body || typeof body.querySelectorAll !== 'function') return 0;
+  let pending = 0;
+  for (const line of body.querySelectorAll('.ace-line')) {
+    if (line.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]')) {
+      line.classList.remove('ep-data_tables-timeslider-pending');
+      continue;
+    }
+    if (findTbljsonEncodedMetadata(line)) {
+      line.classList.add('ep-data_tables-timeslider-pending');
+      pending++;
+    } else {
+      line.classList.remove('ep-data_tables-timeslider-pending');
+    }
+  }
+  return pending;
 };
 
 const renderTimesliderTables = (root = document) => {
@@ -229,11 +254,10 @@ const getRequestedTimesliderRevision = () => {
   return match ? Number(match[1]) : null;
 };
 
-const isTimesliderReadyToRender = () => {
+const isTimesliderReadyToRender = (requestedRevision = null) => {
   const body = document.querySelector('#innerdocbody') || document.body;
   if (!body || !body.querySelector('.ace-line')) return false;
 
-  const requestedRevision = getRequestedTimesliderRevision();
   if (requestedRevision == null) return true;
 
   const visibleRevision = getVisibleTimesliderRevision();
@@ -245,17 +269,39 @@ const startTimesliderRenderer = () => {
   const target = document.querySelector('#innerdocbody') || document.body;
   if (!target || target.__epDataTablesTimesliderObserver) return;
 
-  let renderTimer = null;
+  let initialRequestedRevision = getRequestedTimesliderRevision();
+  let waitingForInitialRevision = initialRequestedRevision != null;
+  let initialRetryTimer = null;
+  let renderFrame = null;
+  const clearInitialWait = () => {
+    waitingForInitialRevision = false;
+    initialRequestedRevision = null;
+    clearTimeout(initialRetryTimer);
+    initialRetryTimer = null;
+  };
+  const scheduleInitialRetry = () => {
+    clearTimeout(initialRetryTimer);
+    initialRetryTimer = setTimeout(() => {
+      initialRetryTimer = null;
+      schedule();
+    }, 100);
+  };
   const schedule = () => {
-    clearTimeout(renderTimer);
-    renderTimer = setTimeout(() => {
-      renderTimer = null;
-      if (!isTimesliderReadyToRender()) {
-        schedule();
+    if (renderFrame != null) return;
+    const requestFrame = window.requestAnimationFrame || ((fn) => setTimeout(fn, 0));
+    renderFrame = requestFrame(() => {
+      renderFrame = null;
+      if (waitingForInitialRevision && getRequestedTimesliderRevision() !== initialRequestedRevision) {
+        clearInitialWait();
+      }
+      if (!isTimesliderReadyToRender(waitingForInitialRevision ? initialRequestedRevision : null)) {
+        if (waitingForInitialRevision) scheduleInitialRetry();
         return;
       }
+      markPendingTimesliderTables(document);
       renderTimesliderTables(document);
-    }, 250);
+      clearInitialWait();
+    });
   };
 
   const scheduleAfterSliderUpdate = () => {
@@ -267,7 +313,12 @@ const startTimesliderRenderer = () => {
   if (window.BroadcastSlider && typeof window.BroadcastSlider.onSlider === 'function') {
     window.BroadcastSlider.onSlider(scheduleAfterSliderUpdate);
   }
-  window.addEventListener('hashchange', scheduleAfterSliderUpdate);
+  window.addEventListener('hashchange', () => {
+    if (waitingForInitialRevision && getRequestedTimesliderRevision() !== initialRequestedRevision) {
+      clearInitialWait();
+    }
+    scheduleAfterSliderUpdate();
+  });
 
   const observer = new MutationObserver(schedule);
   observer.observe(target, {childList: true, subtree: true});

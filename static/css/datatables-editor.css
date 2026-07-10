@@ -70,6 +70,10 @@ display: none !important;
 display: none !important;
 } 
 
+.timeslider .ace-line.ep-data_tables-timeslider-pending {
+visibility: hidden;
+}
+
 .ep-data_tables-delim {
 font-size:0;
 line-height:0;
