@@ -4,7 +4,11 @@
 const settings = require('ep_etherpad-lite/node/utils/Settings');
 if (!settings.toolbar) settings.toolbar = {};
 
-const log = (...m) => console.log('[ep_data_tables:collectContentPre_SERVER]', ...m);
+const DEBUG = false;
+const debugLog = (...m) => {
+  if (DEBUG) console.debug(...m);
+};
+const log = (...m) => debugLog('[ep_data_tables:collectContentPre_SERVER]', ...m);
 
 // Base64 decoding function for URL-safe variant
 const dec = (s) => {

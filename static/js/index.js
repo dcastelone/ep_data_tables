@@ -1,7 +1,11 @@
 // index.js – server-side EEJS injections for ep_data_tables
 const eejs = require('ep_etherpad-lite/node/eejs/');
 
-const log = (...m) => console.debug('[ep_data_tables:index]', ...m);
+const DEBUG = false;
+const debugLog = (...m) => {
+  if (DEBUG) console.debug(...m);
+};
+const log = (...m) => debugLog('[ep_data_tables:index]', ...m);
 log('Loading EEJS templates...');
 
 const scriptsTag        = eejs.require('ep_data_tables/templates/datatablesScripts.ejs');

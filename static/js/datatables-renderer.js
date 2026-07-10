@@ -6,7 +6,11 @@
  * Regular pad rendering is done by client_hooks.js.
  */
 
-const log = (...m) => console.debug('[ep_data_tables:datatables-renderer]', ...m);
+const DEBUG = false;
+const debugLog = (...m) => {
+  if (DEBUG) console.debug(...m);
+};
+const log = (...m) => debugLog('[ep_data_tables:datatables-renderer]', ...m);
 const DELIMITER = '\u241F';
 const HIDDEN_DELIM = DELIMITER;
 const enhanceTableHtml = (html, metadata = {}) => {

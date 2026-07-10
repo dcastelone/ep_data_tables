@@ -1,15 +1,19 @@
 const ATTR_TABLE_JSON = 'tbljson';
 const {enhanceTableHtml} = require('./accessibility');
+const DEBUG = false;
+const debugLog = (...m) => {
+  if (DEBUG) console.debug(...m);
+};
 if (typeof window !== 'undefined') {
   if (window.__epDataTablesLoaded) {
-    console.debug('[ep_data_tables] Duplicate client_hooks.js load suppressed');
+    debugLog('[ep_data_tables] Duplicate client_hooks.js load suppressed');
     return;
   }
   window.__epDataTablesLoaded = true;
 }
 const ATTR_CELL       = 'td';
 const ATTR_CLASS_PREFIX = 'tbljson-';
-const log             = (...m) => console.debug('[ep_data_tables:client_hooks]', ...m);
+const log             = (...m) => debugLog('[ep_data_tables:client_hooks]', ...m);
 const DELIMITER       = '\u241F';
 const HIDDEN_DELIM    = DELIMITER;
 const INPUTTYPE_REPLACEMENT_TYPES = new Set(['insertReplacementText', 'insertFromComposition']);
@@ -82,7 +86,7 @@ const cacheStylingForLine = (lineId, styling, cells) => {
     if (now - v.timestamp > __epDT_STYLING_CACHE_TTL_MS) __epDT_pendingStylingForLine.delete(k);
   }
   __epDT_pendingStylingForLine.set(lineId, { styling, cells: cells ? cells.slice() : [], timestamp: now });
-  console.debug('[ep_data_tables:stylingCache] cached', { lineId: lineId.slice(0, 20), stylingCount: styling.length, cellCount: cells?.length || 0 });
+  debugLog('[ep_data_tables:stylingCache] cached', { lineId: lineId.slice(0, 20), stylingCount: styling.length, cellCount: cells?.length || 0 });
 };
 
 const getCachedStyling = (lineId) => {
@@ -144,20 +148,20 @@ if (typeof window !== 'undefined' && !window.__epDT_errorHandlerInstalled) {
 // Validate line exists, has valid lineNode, and node is in DOM (prevents keyToNodeMap errors)
 const isLineSafeToModify = (rep, lineNum, logPrefix = '') => {
   try {
-    if (!rep || !rep.lines) { if (logPrefix) console.debug(logPrefix, 'rep invalid'); return false; }
+    if (!rep || !rep.lines) { if (logPrefix) debugLog(logPrefix, 'rep invalid'); return false; }
     const lineCount = rep.lines.length();
-    if (lineNum < 0 || lineNum >= lineCount) { if (logPrefix) console.debug(logPrefix, 'line out of bounds', { lineNum, lineCount }); return false; }
+    if (lineNum < 0 || lineNum >= lineCount) { if (logPrefix) debugLog(logPrefix, 'line out of bounds', { lineNum, lineCount }); return false; }
     const lineEntry = rep.lines.atIndex(lineNum);
-    if (!lineEntry) { if (logPrefix) console.debug(logPrefix, 'no line entry', { lineNum }); return false; }
-    if (!lineEntry.lineNode) { if (logPrefix) console.debug(logPrefix, 'lineNode missing', { lineNum }); return false; }
-    if (!lineEntry.lineNode.parentNode) { if (logPrefix) console.debug(logPrefix, 'lineNode orphaned', { lineNum }); return false; }
+    if (!lineEntry) { if (logPrefix) debugLog(logPrefix, 'no line entry', { lineNum }); return false; }
+    if (!lineEntry.lineNode) { if (logPrefix) debugLog(logPrefix, 'lineNode missing', { lineNum }); return false; }
+    if (!lineEntry.lineNode.parentNode) { if (logPrefix) debugLog(logPrefix, 'lineNode orphaned', { lineNum }); return false; }
     if (typeof lineEntry.lineNode.isConnected === 'boolean' && !lineEntry.lineNode.isConnected) {
-      if (logPrefix) console.debug(logPrefix, 'lineNode not connected', { lineNum }); return false;
+      if (logPrefix) debugLog(logPrefix, 'lineNode not connected', { lineNum }); return false;
     }
     
     return true;
   } catch (err) {
-    if (logPrefix) console.debug(logPrefix, 'validation error', err?.message);
+    if (logPrefix) debugLog(logPrefix, 'validation error', err?.message);
     return false;
   }
 };
@@ -656,7 +660,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   try {
     if (node && nodeId) {
       lineNum = _getLineNumberOfElement(node);
-      console.debug('[ep_data_tables:acePostWriteDomLineHTML] resolve-dom-index', { nodeId, lineNum });
+      debugLog('[ep_data_tables:acePostWriteDomLineHTML] resolve-dom-index', { nodeId, lineNum });
     }
   } catch (e) {
     console.error('[ep_data_tables:acePostWriteDomLineHTML] resolve-exception', e);
@@ -737,7 +741,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
   for (let i = 0; i < htmlSegments.length; i++) {
     try {
       const uniqueCells = Array.from(new Set((htmlSegments[i] || '').match(/\btblCell-(\d+)\b/g) || []));
-      if (uniqueCells.length > 1) console.warn('[ep_data_tables][diag] segment has multiple tblCell markers', { segIndex: i, uniqueCells });
+      if (uniqueCells.length > 1) debugLog('[ep_data_tables][diag] segment has multiple tblCell markers', { segIndex: i, uniqueCells });
     } catch (_) {}
   }
 
@@ -750,7 +754,7 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
     // The table will display with its actual content (may differ from metadata column count)
     // Content and styling are preserved - user can edit normally
     // If user edits this row, handleDesktopCommitInput will normalize it at that time
-    console.warn('[ep_data_tables][diag] Segment/column mismatch (rendering as-is)', { 
+    debugLog('[ep_data_tables][diag] Segment/column mismatch (rendering as-is)', { 
       nodeId, lineNum, 
       actualSegs: htmlSegments.length, 
       expectedCols: rowMetadata.cols, 
@@ -770,10 +774,10 @@ exports.acePostWriteDomLineHTML = function (hook_name, args, cb) {
         const selector = `div.ace-line:not(#${nodeId}) table.dataTable[data-tblId="${rowMetadata.tblId}"][data-row="${rowMetadata.row}"]`;
         const dupe = doc.querySelector(selector);
         if (dupe) {
-          console.warn(`${logPrefix} NodeID#${nodeId}: Duplicate table detected elsewhere (tblId=${rowMetadata.tblId}, row=${rowMetadata.row}). Skipping rewrite to prevent duplication.`);
+          debugLog(`${logPrefix} NodeID#${nodeId}: Duplicate table detected elsewhere (tblId=${rowMetadata.tblId}, row=${rowMetadata.row}). Skipping rewrite to prevent duplication.`);
           return cb();
         } else {
-          console.debug(`${logPrefix} NodeID#${nodeId}: no-duplicate-found`, {
+          debugLog(`${logPrefix} NodeID#${nodeId}: no-duplicate-found`, {
             selector, tblId: rowMetadata.tblId, row: rowMetadata.row,
           });
         }
@@ -1055,7 +1059,7 @@ exports.aceKeyEvent = (h, ctx) => {
       targetCellIndex > 0 &&
       selectionStartColInLine === cellContentStartColInLine - DELIMITER.length;
 
-    console.log(`[ep_data_tables:highlight-deletion] Selection analysis:`, {
+    debugLog(`[ep_data_tables:highlight-deletion] Selection analysis:`, {
       targetCellIndex,
       totalCols: metadataForTargetLine.cols,
       selectionStartCol: selectionStartColInLine,
@@ -1071,12 +1075,12 @@ exports.aceKeyEvent = (h, ctx) => {
     });
 
     if (hasLeadingDelim) {
-      console.log(`[ep_data_tables:highlight-deletion] CLAMPING selection start from ${selectionStartColInLine} to ${cellContentStartColInLine}`);
+      debugLog(`[ep_data_tables:highlight-deletion] CLAMPING selection start from ${selectionStartColInLine} to ${cellContentStartColInLine}`);
       selectionStartColInLine = cellContentStartColInLine;
     }
 
     if (hasTrailingDelim) {
-      console.log(`[ep_data_tables:highlight-deletion] CLAMPING selection end from ${selectionEndColInLine} to ${cellContentEndColInLine}`);
+      debugLog(`[ep_data_tables:highlight-deletion] CLAMPING selection end from ${selectionEndColInLine} to ${cellContentEndColInLine}`);
       selectionEndColInLine = cellContentEndColInLine;
     }
 
@@ -1129,7 +1133,7 @@ exports.aceKeyEvent = (h, ctx) => {
         if (replacementText.length > 0) {
           const attrStart = [currentLineNum, selectionStartColInLine];
           const attrEnd   = [currentLineNum, selectionStartColInLine + replacementText.length];
-          console.log(`[ep_data_tables:highlight-deletion] Applying cell attribute to replacement text "${replacementText}" at range [${attrStart[0]},${attrStart[1]}] to [${attrEnd[0]},${attrEnd[1]}]`);
+          debugLog(`[ep_data_tables:highlight-deletion] Applying cell attribute to replacement text "${replacementText}" at range [${attrStart[0]},${attrStart[1]}] to [${attrEnd[0]},${attrEnd[1]}]`);
           editorInfo.ace_performDocumentApplyAttributesToRange(
             attrStart, attrEnd, [[ATTR_CELL, String(targetCellIndex)]],
           );
@@ -1375,7 +1379,7 @@ exports.aceInitialized = (h, ctx) => {
   const docManager = ctx.documentAttributeManager;
   try {
     EP_DT_EDITOR_INFO = ed;
-    console.debug('[ep_data_tables:aceInitialized] stored editorInfo for late-stage hooks');
+    debugLog('[ep_data_tables:aceInitialized] stored editorInfo for late-stage hooks');
   } catch (_) {
     console.error('[ep_data_tables:aceInitialized] failed to store editorInfo');
   }
@@ -1406,7 +1410,7 @@ exports.aceInitialized = (h, ctx) => {
     // Retry logic for iframe access to handle timing/race conditions
     const tryGetIframeBody = (attempt = 0) => {
       if (attempt > 0) {
-        console.log(`${callWithAceLogPrefix} Retry attempt ${attempt}/5 to access iframe body`);
+        debugLog(`${callWithAceLogPrefix} Retry attempt ${attempt}/5 to access iframe body`);
       }
       
       const $iframeOuter = $('iframe[name="ace_outer"]');
@@ -1441,7 +1445,7 @@ exports.aceInitialized = (h, ctx) => {
 
       const $inner = $(innerDocBody[0]);
       if (attempt > 0) {
-        console.log(`${callWithAceLogPrefix} Successfully found iframe body on attempt ${attempt + 1}`);
+        debugLog(`${callWithAceLogPrefix} Successfully found iframe body on attempt ${attempt + 1}`);
       }
      
       // SUCCESS - Now attach all listeners and set attributes
@@ -1479,7 +1483,7 @@ exports.aceInitialized = (h, ctx) => {
               tblMeta = { error: metaErr?.message };
             }
           }
-          console.debug(`[ep_data_tables:compositionTrace] ${tag}`, {
+          debugLog(`[ep_data_tables:compositionTrace] ${tag}`, {
             inputType: nativeEvt && nativeEvt.inputType,
             data: typeof nativeEvt?.data === 'string' ? nativeEvt.data : null,
             isComposing: !!(nativeEvt && nativeEvt.isComposing),
@@ -1731,7 +1735,7 @@ exports.aceInitialized = (h, ctx) => {
                           const attrValue = cls.substring(prefix.length);
                           stylingAttrs.push([attrName, attrValue]);
                           matched = true;
-                          console.debug('[ep_data_tables:extractStyling] prefix-match', { cls, prefix, attrName, attrValue });
+                          debugLog('[ep_data_tables:extractStyling] prefix-match', { cls, prefix, attrName, attrValue });
                           break;
                         }
                       }
@@ -1741,7 +1745,7 @@ exports.aceInitialized = (h, ctx) => {
                         const attrValue = cls.substring(dashIdx + 1);
                         stylingAttrs.push([attrName, attrValue]);
                         if (attrValue.includes('-') && cls.startsWith('image')) {
-                          console.warn('[ep_data_tables:extractStyling] POSSIBLE MISPARSED IMAGE CLASS', { cls, attrName, attrValue });
+                          debugLog('[ep_data_tables:extractStyling] POSSIBLE MISPARSED IMAGE CLASS', { cls, attrName, attrValue });
                         }
                       }
                     }
@@ -1762,7 +1766,7 @@ exports.aceInitialized = (h, ctx) => {
             });
           });
           const summary = extractedStyling.map(s => ({ cell: s.cellIdx, text: s.text.slice(0, 12).replace(/[\u200B]/g, '⁰'), attrs: s.attrs.map(a => a[0]).join(','), isImage: s.isImage }));
-          console.debug('[ep_data_tables:extractStyling] extracted', {
+          debugLog('[ep_data_tables:extractStyling] extracted', {
             count: extractedStyling.length,
             spansProcessed: totalSpansProcessed,
             spansWithAttrs: totalSpansWithAttrs,
@@ -1784,7 +1788,7 @@ exports.aceInitialized = (h, ctx) => {
         if (cells && cells.length > 0) {
           const cellLens = cells.map((c, i) => `c${i}:${c?.length || 0}`).join(' ');
           const fullLen = cells.reduce((sum, c) => sum + (c?.length || 0), 0) + (cells.length - 1);
-          console.debug('[ep_data_tables:reapplyStyling] cells', { lineNum, cellLens, fullLen, delimiters: cells.length - 1 });
+          debugLog('[ep_data_tables:reapplyStyling] cells', { lineNum, cellLens, fullLen, delimiters: cells.length - 1 });
         }
         try {
           for (const style of extractedStyling) {
@@ -1893,7 +1897,7 @@ exports.aceInitialized = (h, ctx) => {
                 }
               }
               if (foundCellIdx === -1 || foundPos === -1) {
-                console.debug('[ep_data_tables:reapplyStyling] skipped', {
+                debugLog('[ep_data_tables:reapplyStyling] skipped', {
                   originalCellIdx, text: styledText.slice(0, 10), reason: 'not-found',
                   isImage: style.isImage, isZeroWidth: isZeroWidthText,
                 });
@@ -1903,7 +1907,7 @@ exports.aceInitialized = (h, ctx) => {
             
             const foundCellContent = cells[foundCellIdx] || '';
             if (foundPos + styledText.length > foundCellContent.length) {
-              console.debug('[ep_data_tables:reapplyStyling] skipped', {
+              debugLog('[ep_data_tables:reapplyStyling] skipped', {
                 foundCellIdx, text: styledText.slice(0, 10), reason: 'out-of-bounds',
                 foundPos, textLen: styledText.length, cellLen: foundCellContent.length,
               });
@@ -1925,7 +1929,7 @@ exports.aceInitialized = (h, ctx) => {
             }
             
             if (absEnd > totalLineLen) {
-              console.debug('[ep_data_tables:reapplyStyling] skipped', {
+              debugLog('[ep_data_tables:reapplyStyling] skipped', {
                 foundCellIdx, text: styledText.slice(0, 10), reason: 'exceeds-line-bounds',
                 absStart, absEnd, totalLineLen,
               });
@@ -1937,7 +1941,7 @@ exports.aceInitialized = (h, ctx) => {
               if ((style.isImage || isZeroWidthText) && imagePositionsPerCell[foundCellIdx] === undefined) imagePositionsPerCell[foundCellIdx] = foundPos;
               const priorCellsDebug = []; let priorSum = 0;
               for (let c = 0; c < foundCellIdx; c++) { priorCellsDebug.push(`c${c}:${cells[c]?.length || 0}`); priorSum += (cells[c]?.length || 0) + DELIMITER.length; }
-              console.debug('[ep_data_tables:reapplyStyling] applying', { cell: foundCellIdx, foundPos, priorSum, absStart, absEnd, text: styledText.slice(0, 10), match: matchType, priorCells: priorCellsDebug.join('+'), attrs: style.attrs.map(a => `${a[0]}:${String(a[1]).slice(0,10)}`) });
+              debugLog('[ep_data_tables:reapplyStyling] applying', { cell: foundCellIdx, foundPos, priorSum, absStart, absEnd, text: styledText.slice(0, 10), match: matchType, priorCells: priorCellsDebug.join('+'), attrs: style.attrs.map(a => `${a[0]}:${String(a[1]).slice(0,10)}`) });
               aceInstance.ace_performDocumentApplyAttributesToRange(
                 [lineNum, absStart],
                 [lineNum, absEnd],
@@ -1952,7 +1956,7 @@ exports.aceInitialized = (h, ctx) => {
             }
           }
           if (appliedCount > 0) {
-            console.debug('[ep_data_tables:reapplyStyling] applied', {
+            debugLog('[ep_data_tables:reapplyStyling] applied', {
               lineNum, 
               applied: appliedCount, 
               total: extractedStyling.length,
@@ -1967,7 +1971,7 @@ exports.aceInitialized = (h, ctx) => {
             } catch (_) {}
           }
         } catch (err) {
-          console.debug('[ep_data_tables:reapplyStyling] error (non-fatal)', err?.message);
+          debugLog('[ep_data_tables:reapplyStyling] error (non-fatal)', err?.message);
         }
       };
       
@@ -1984,7 +1988,7 @@ exports.aceInitialized = (h, ctx) => {
       ed.ep_data_tables_restoreCachedStyling = (cacheKey, tblId, row) => {
         const cached = getCachedStyling(cacheKey);
         if (!cached || !cached.styling || cached.styling.length === 0) {
-          console.debug('[ep_data_tables:restoreCachedStyling] no cached styling', { cacheKey: cacheKey?.slice?.(0, 20) || cacheKey });
+          debugLog('[ep_data_tables:restoreCachedStyling] no cached styling', { cacheKey: cacheKey?.slice?.(0, 20) || cacheKey });
           return;
         }
         
@@ -1993,7 +1997,7 @@ exports.aceInitialized = (h, ctx) => {
             try {
               const rep = aceInstance.ace_getRep();
               if (!rep || !rep.lines) {
-                console.debug('[ep_data_tables:restoreCachedStyling] no rep');
+                debugLog('[ep_data_tables:restoreCachedStyling] no rep');
                 return;
               }
               
@@ -2014,7 +2018,7 @@ exports.aceInitialized = (h, ctx) => {
                       const meta = JSON.parse(lineAttr);
                       if (meta.tblId === tblId && meta.row === row) {
                         lineIndex = li;
-                        console.debug('[ep_data_tables:restoreCachedStyling] found via tblId:row', { tblId, row, lineIndex });
+                        debugLog('[ep_data_tables:restoreCachedStyling] found via tblId:row', { tblId, row, lineIndex });
                         break;
                       }
                     }
@@ -2023,7 +2027,7 @@ exports.aceInitialized = (h, ctx) => {
               }
               
               if (lineIndex < 0 || lineIndex >= rep.lines.length()) {
-                console.debug('[ep_data_tables:restoreCachedStyling] line not found', { 
+                debugLog('[ep_data_tables:restoreCachedStyling] line not found', { 
                   cacheKey: cacheKey?.slice?.(0, 20) || cacheKey, 
                   tblId, 
                   row,
@@ -2036,7 +2040,7 @@ exports.aceInitialized = (h, ctx) => {
               const lineText = lineEntry?.text || '';
               const cells = lineText.split(DELIMITER);
               
-              console.debug('[ep_data_tables:restoreCachedStyling] restoring', {
+              debugLog('[ep_data_tables:restoreCachedStyling] restoring', {
                 cacheKey: cacheKey?.slice?.(0, 20) || cacheKey,
                 lineIndex,
                 stylingCount: cached.styling.length,
@@ -2047,13 +2051,13 @@ exports.aceInitialized = (h, ctx) => {
               
               clearCachedStyling(cacheKey);
               
-              console.debug('[ep_data_tables:restoreCachedStyling] restored successfully');
+              debugLog('[ep_data_tables:restoreCachedStyling] restored successfully');
             } catch (innerErr) {
-              console.debug('[ep_data_tables:restoreCachedStyling] inner error', innerErr?.message);
+              debugLog('[ep_data_tables:restoreCachedStyling] inner error', innerErr?.message);
             }
           }, 'ep_data_tables:restoreCachedStyling', true);
         } catch (outerErr) {
-          console.debug('[ep_data_tables:restoreCachedStyling] outer error', outerErr?.message);
+          debugLog('[ep_data_tables:restoreCachedStyling] outer error', outerErr?.message);
         }
       };
 
@@ -2106,7 +2110,7 @@ exports.aceInitialized = (h, ctx) => {
               extractedStyling = extractStylingFromLineDOM(lineEntryBefore.lineNode);
             }
             if (extractedStyling && extractedStyling.length > 0) {
-              console.debug('[ep_data_tables:applyCanonicalCellsToLine] using styling', {
+              debugLog('[ep_data_tables:applyCanonicalCellsToLine] using styling', {
                 lineNum, count: extractedStyling.length,
                 source: preCapturedStyling ? 'pre-captured' : 'lineEntry',
                 sample: extractedStyling.slice(0, 2).map(s => ({ cell: s.cellIdx, attrs: s.attrs })),
@@ -2724,7 +2728,7 @@ exports.aceInitialized = (h, ctx) => {
                 }
               }
             } catch (metaErr) {
-              console.debug('[ep_data_tables:compositionstart] metadata capture error', metaErr);
+              debugLog('[ep_data_tables:compositionstart] metadata capture error', metaErr);
             }
             desktopComposition = {
               active: true,
@@ -2742,7 +2746,7 @@ exports.aceInitialized = (h, ctx) => {
             }
           }
         } catch (err) {
-          console.debug('[ep_data_tables:compositionstart] error', err);
+          debugLog('[ep_data_tables:compositionstart] error', err);
           desktopComposition = { active: false, start: null, end: null, lineNum: null, cellIndex: -1, snapshot: null, snapshotMeta: null, originalTableLine: null };
         }
       });
@@ -3742,7 +3746,7 @@ exports.aceInitialized = (h, ctx) => {
 
           // Validate line is safe to modify before replacement (prevents keyToNodeMap errors)
           if (!isLineSafeToModify(freshRep, freshSelStart[0], '[ep_data_tables:beforeinput-commit]')) {
-            console.warn('[ep_data_tables:beforeinput-commit] line not safe to modify, skipping');
+            debugLog('[ep_data_tables:beforeinput-commit] line not safe to modify, skipping');
             return;
           }
           ace.ace_performDocumentReplaceRange(freshSelStart, freshSelEnd, insertedText);
@@ -4368,14 +4372,14 @@ exports.aceInitialized = (h, ctx) => {
                   timestamp: Date.now(),
                 };
                 
-                console.debug('[ep_data_tables:compositionend] cursor positioned', {
+                debugLog('[ep_data_tables:compositionend] cursor positioned', {
                   lineNum: pipelineLineNum,
                   col: expectedCursorCol,
                   cellIndex: idx,
                   insertedLen: insertedTextLen,
                 });
               } catch (cursorErr) {
-                console.debug('[ep_data_tables:compositionend] cursor positioning error', cursorErr?.message);
+                debugLog('[ep_data_tables:compositionend] cursor positioning error', cursorErr?.message);
               }
 
             // Post-composition orphan detection and repair using snapshot
@@ -4385,12 +4389,12 @@ exports.aceInitialized = (h, ctx) => {
               // GUARD: Skip if a new composition started since we scheduled this
               // This prevents concurrent document modifications during rapid typing
               if (__epDT_compositionActive) {
-                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - new composition active');
+                debugLog('[ep_data_tables:compositionend-orphan-repair] skipped - new composition active');
                 return;
               }
               // Also skip if another composition just ended (within 30ms)
               if (Date.now() - __epDT_lastCompositionEndTime < 30 && __epDT_lastCompositionEndTime > orphanRepairScheduledAt) {
-                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - very recent composition end');
+                debugLog('[ep_data_tables:compositionend-orphan-repair] skipped - very recent composition end');
                 return;
               }
               
@@ -4399,17 +4403,17 @@ exports.aceInitialized = (h, ctx) => {
               try {
                 const preCheckRep = ed.ace_getRep && ed.ace_getRep();
                 if (!preCheckRep || !preCheckRep.lines) {
-                  console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - rep unavailable in pre-check');
+                  debugLog('[ep_data_tables:compositionend-orphan-repair] skipped - rep unavailable in pre-check');
                   return;
                 }
                 // Additional sanity check - verify we can access line count without error
                 const preCheckLineCount = preCheckRep.lines.length();
                 if (typeof preCheckLineCount !== 'number' || preCheckLineCount < 1) {
-                  console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - invalid line count in pre-check');
+                  debugLog('[ep_data_tables:compositionend-orphan-repair] skipped - invalid line count in pre-check');
                   return;
                 }
               } catch (preCheckErr) {
-                console.debug('[ep_data_tables:compositionend-orphan-repair] skipped - pre-check failed', preCheckErr?.message);
+                debugLog('[ep_data_tables:compositionend-orphan-repair] skipped - pre-check failed', preCheckErr?.message);
                 return;
               }
               
@@ -4471,7 +4475,7 @@ exports.aceInitialized = (h, ctx) => {
                                       source: 'dom-class-tbljson',
                                     });
                                     seenLines.add(li);
-                                    console.debug('[ep_data_tables:compositionend-orphan-repair] tbljson DOM orphan found', {
+                                    debugLog('[ep_data_tables:compositionend-orphan-repair] tbljson DOM orphan found', {
                                       lineNum: li, tblId: decoded.tblId, row: decoded.row,
                                     });
                                     break;
@@ -4495,7 +4499,7 @@ exports.aceInitialized = (h, ctx) => {
                                   source: 'dom-class-tblCell',
                                 });
                                 seenLines.add(li);
-                                console.debug('[ep_data_tables:compositionend-orphan-repair] tblCell DOM orphan found', {
+                                debugLog('[ep_data_tables:compositionend-orphan-repair] tblCell DOM orphan found', {
                                   lineNum: li, targetTblId, targetRow, textLen: orphanText.length,
                                 });
                               }
@@ -4508,7 +4512,7 @@ exports.aceInitialized = (h, ctx) => {
                   
                   // If more than one line matches, we have orphans - need to merge
                   if (matchingLines.length > 1) {
-                    console.warn('[ep_data_tables:compositionend-orphan-repair] detected orphan lines', {
+                    debugLog('[ep_data_tables:compositionend-orphan-repair] detected orphan lines', {
                       targetTblId, targetRow, lineCount: matchingLines.length,
                       lines: matchingLines.map(l => ({ line: l.lineNum, textLen: l.text.length })),
                       hasSnapshot: !!snapshotCells,
@@ -4533,7 +4537,7 @@ exports.aceInitialized = (h, ctx) => {
                           );
                           if (tableEl) {
                             lineWithTableIdx = ai;
-                            console.debug('[ep_data_tables:compositionend-orphan-repair] LIVE DOM found table', {
+                            debugLog('[ep_data_tables:compositionend-orphan-repair] LIVE DOM found table', {
                               domIndex: ai, aceLineId: aceLine.id,
                             });
                             break;
@@ -4550,7 +4554,7 @@ exports.aceInitialized = (h, ctx) => {
                       primaryLine = matchingLines.find(ml => ml.lineNum === lineWithTableIdx);
                       if (primaryLine) {
                         orphans = matchingLines.filter(ml => ml.lineNum !== lineWithTableIdx);
-                        console.debug('[ep_data_tables:compositionend-orphan-repair] primary set via live DOM', {
+                        debugLog('[ep_data_tables:compositionend-orphan-repair] primary set via live DOM', {
                           lineNum: primaryLine.lineNum,
                         });
                       }
@@ -4561,7 +4565,7 @@ exports.aceInitialized = (h, ctx) => {
                       matchingLines.sort((a, b) => a.lineNum - b.lineNum);
                       primaryLine = matchingLines[0];
                       orphans = matchingLines.slice(1);
-                      console.debug('[ep_data_tables:compositionend-orphan-repair] no table DOM found, using lowest line', {
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] no table DOM found, using lowest line', {
                         lineNum: primaryLine.lineNum,
                       });
                     }
@@ -4609,11 +4613,11 @@ exports.aceInitialized = (h, ctx) => {
                     // Update primary line with merged content
                     // First validate the line is safe to modify (prevents keyToNodeMap errors)
                     if (!isLineSafeToModify(repPost, primaryLine.lineNum, '[ep_data_tables:compositionend-orphan-repair] primary')) {
-                      console.warn('[ep_data_tables:compositionend-orphan-repair] primary line not safe to modify, aborting merge');
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] primary line not safe to modify, aborting merge');
                     } else {
                     const currentPrimaryText = repPost.lines.atIndex(primaryLine.lineNum)?.text || '';
                     if (mergedText !== currentPrimaryText) {
-                      console.debug('[ep_data_tables:compositionend-orphan-repair] applying merged text', {
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] applying merged text', {
                         primaryLine: primaryLine.lineNum, from: currentPrimaryText.length, to: mergedText.length,
                       });
                       ace2.ace_performDocumentReplaceRange(
@@ -4641,7 +4645,7 @@ exports.aceInitialized = (h, ctx) => {
                     
                     // Delete orphan lines bottom-up (content already merged)
                     if (!isDestructiveOperationSafe('compositionend-orphan-repair orphan removal')) {
-                      console.debug('[ep_data_tables:compositionend-orphan-repair] skipping orphan removal (safe mode)');
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] skipping orphan removal (safe mode)');
                     } else {
                     orphans.sort((a, b) => b.lineNum - a.lineNum);
                     let orphansRemoved = 0;
@@ -4657,7 +4661,7 @@ exports.aceInitialized = (h, ctx) => {
 
                         const totalLines = repCheck.lines.length();
                         if (adjustedLineNum >= totalLines || adjustedLineNum < 0) {
-                          console.debug('[ep_data_tables:compositionend-orphan-repair] orphan line out of bounds, skipping', {
+                          debugLog('[ep_data_tables:compositionend-orphan-repair] orphan line out of bounds, skipping', {
                             orphanLine: orphan.lineNum,
                             adjustedLine: adjustedLineNum,
                             totalLines,
@@ -4687,7 +4691,7 @@ exports.aceInitialized = (h, ctx) => {
                             const lineMeta = JSON.parse(lineAttr);
                             // Verify this is still for our target table
                             if (lineMeta.tblId !== targetTblId || lineMeta.row !== targetRow) {
-                              console.debug('[ep_data_tables:compositionend-orphan-repair] line has different table, skipping', {
+                              debugLog('[ep_data_tables:compositionend-orphan-repair] line has different table, skipping', {
                                 adjustedLine: adjustedLineNum,
                                 lineTblId: lineMeta.tblId,
                                 lineRow: lineMeta.row,
@@ -4706,7 +4710,7 @@ exports.aceInitialized = (h, ctx) => {
                           : 0;
 
                         if (orphanOriginalText.length > 0 && currentLineText.length > 0 && textSimilarity < 0.2) {
-                          console.warn('[ep_data_tables:compositionend-orphan-repair] line content changed significantly, skipping deletion', {
+                          debugLog('[ep_data_tables:compositionend-orphan-repair] line content changed significantly, skipping deletion', {
                             adjustedLine: adjustedLineNum,
                             originalLen: orphanOriginalText.length,
                             currentLen: currentLineText.length,
@@ -4720,10 +4724,10 @@ exports.aceInitialized = (h, ctx) => {
                           docManager.removeAttributeOnLine(adjustedLineNum, ATTR_TABLE_JSON);
                         }
                         } catch (attrErr) {
-                          console.debug('[ep_data_tables:compositionend-orphan-repair] removeAttribute failed', attrErr);
+                          debugLog('[ep_data_tables:compositionend-orphan-repair] removeAttribute failed', attrErr);
                         }
 
-                      console.debug('[ep_data_tables:compositionend-orphan-repair] removing orphan (merged)', {
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] removing orphan (merged)', {
                         orphanLine: orphan.lineNum,
                         adjustedLine: adjustedLineNum,
                         contentVerified: true,
@@ -4743,9 +4747,9 @@ exports.aceInitialized = (h, ctx) => {
                     }
                     }
                     try { ace2.ace_fastIncorp(5); } catch (incErr) {
-                      console.debug('[ep_data_tables:compositionend-orphan-repair] fastIncorp error (non-fatal)', incErr?.message);
+                      debugLog('[ep_data_tables:compositionend-orphan-repair] fastIncorp error (non-fatal)', incErr?.message);
                     }
-                    console.debug('[ep_data_tables:compositionend-orphan-repair] repair complete', {
+                    debugLog('[ep_data_tables:compositionend-orphan-repair] repair complete', {
                       primaryLine: primaryLine.lineNum, orphansRemoved,
                     });
                   }
@@ -4759,7 +4763,7 @@ exports.aceInitialized = (h, ctx) => {
                 // This catches errors from ace_callWithAce itself (Etherpad internal state corruption)
                 // When keyToNodeMap.get(...) is undefined, the internal state is corrupted
                 // Don't rethrow - graceful degradation is better than crashing the editor
-                console.warn('[ep_data_tables:compositionend-orphan-repair] ace_callWithAce failed - editor state may need refresh', {
+                debugLog('[ep_data_tables:compositionend-orphan-repair] ace_callWithAce failed - editor state may need refresh', {
                   error: aceCallErr?.message || aceCallErr,
                 });
               }
@@ -5474,7 +5478,7 @@ exports.aceInitialized = (h, ctx) => {
         const shouldStopDown = consecutiveNonTableDown >= EARLY_TERMINATION_THRESHOLD;
 
         if (shouldStopUp && shouldStopDown) {
-          console.debug(`[ep_data_tables] ${funcName}: Early termination - hit ${EARLY_TERMINATION_THRESHOLD} consecutive non-table lines in both directions`);
+          debugLog(`[ep_data_tables] ${funcName}: Early termination - hit ${EARLY_TERMINATION_THRESHOLD} consecutive non-table lines in both directions`);
           break;
         }
 
@@ -5797,7 +5801,7 @@ exports.aceInitialized = (h, ctx) => {
             if (cellContent.length > 0) {
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
+              debugLog(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -5879,7 +5883,7 @@ exports.aceInitialized = (h, ctx) => {
             if (cellContent.length > 0) {
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
+              debugLog(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -5993,7 +5997,7 @@ exports.aceInitialized = (h, ctx) => {
         const cells = lineText.split(DELIMITER);
 
         if (targetColIndex >= cells.length) {
-          console.debug(`[ep_data_tables] ${funcName}: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
+          debugLog(`[ep_data_tables] ${funcName}: Target column ${targetColIndex} doesn't exist in line with ${cells.length} columns`);
           continue;
         }
 
@@ -6012,7 +6016,7 @@ exports.aceInitialized = (h, ctx) => {
           deleteStart -= DELIMITER.length;
         }
 
-        console.debug(`[ep_data_tables] ${funcName}: Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd}`);
+        debugLog(`[ep_data_tables] ${funcName}: Deleting column ${targetColIndex} from line ${tableLine.lineIndex}: chars ${deleteStart}-${deleteEnd}`);
 
         const rangeStart = [tableLine.lineIndex, deleteStart];
         const rangeEnd = [tableLine.lineIndex, deleteEnd];
@@ -6043,7 +6047,7 @@ exports.aceInitialized = (h, ctx) => {
             if (cellContent.length > 0) {
               const cellStart = [tableLine.lineIndex, offset];
               const cellEnd = [tableLine.lineIndex, offset + cellContent.length];
-              console.debug(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
+              debugLog(`[ep_data_tables] ${funcName}: Applying ${ATTR_CELL}=${c} to Line ${tableLine.lineIndex} Range ${offset}-${offset + cellContent.length}`);
               editorInfo.ace_performDocumentApplyAttributesToRange(cellStart, cellEnd, [[ATTR_CELL, String(c)]]);
             }
             offset += cellContent.length;
@@ -6121,14 +6125,14 @@ exports.collectContentLineText = (hookName, context) => {
         try {
           const lineDiv = parentEl.closest('div.ace-line');
           if (lineDiv && !lineDiv.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]')) {
-            console.debug('[ep_data_tables:collector] allowing fresh tbljson content (no table yet)', { lineId: lineDiv.id || null, detectedClass });
+            debugLog('[ep_data_tables:collector] allowing fresh tbljson content (no table yet)', { lineId: lineDiv.id || null, detectedClass });
             return;
           }
         } catch (_) {}
         
         // During composition, skip orphan suppression to avoid discarding active input
         if (isInCompositionCooldown()) {
-          console.debug('[ep_data_tables:collector] skipping orphan suppression (composition cooldown)');
+          debugLog('[ep_data_tables:collector] skipping orphan suppression (composition cooldown)');
           return;
         }
 
@@ -6144,7 +6148,7 @@ exports.collectContentLineText = (hookName, context) => {
           if (tableInLine) {
             // Skip suppression during composition to avoid discarding active input
             if (isInCompositionCooldown()) {
-              console.debug('[ep_data_tables:collector] skipping non-table content suppression (composition cooldown)');
+              debugLog('[ep_data_tables:collector] skipping non-table content suppression (composition cooldown)');
               return;
             }
 
@@ -6226,13 +6230,13 @@ exports.collectContentLineText = (hookName, context) => {
                   editorInfo.ep_data_tables_restoreCachedStyling(keyForRestore, tblIdForRestore, rowForRestore);
                 }
               } catch (restoreErr) {
-                console.debug('[ep_data_tables:collector] styling restore error (non-fatal)', restoreErr?.message);
+                debugLog('[ep_data_tables:collector] styling restore error (non-fatal)', restoreErr?.message);
               }
             }, 0);
           }
         }
       } catch (captureErr) {
-        console.debug('[ep_data_tables:collector] styling capture error (non-fatal)', captureErr?.message);
+        debugLog('[ep_data_tables:collector] styling capture error (non-fatal)', captureErr?.message);
       }
     }
     
@@ -6694,6 +6698,4 @@ exports.aceUndoRedo = (hook, ctx) => {
     console.error(`${logPrefix} Error during undo/redo validation:`, e);
   }
 };
-
-
 

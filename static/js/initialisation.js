@@ -1,6 +1,10 @@
 /* global $ */
 
-const log = (...m) => console.debug('[ep_data_tables:initialisation]', ...m);
+const DEBUG = false;
+const debugLog = (...m) => {
+  if (DEBUG) console.debug(...m);
+};
+const log = (...m) => debugLog('[ep_data_tables:initialisation]', ...m);
 const {setupMenuAccessibility} = require('./accessibility');
 
 // NEW: Helper function to get line number (adapted from ep_image_insert)
@@ -281,7 +285,7 @@ exports.postAceInit = (hook, ctx) => {
                         // Store info on the shared ace editor object
                         ace.editor.ep_data_tables_last_clicked = { lineNum, cellIndex, tblId };
                     } else {
-                        console.warn('[ep_data_tables mousedown] Could not reliably get cell info (FAIL).', {tblId, cellIndex, lineNum});
+                        debugLog('[ep_data_tables mousedown] Could not reliably get cell info (FAIL).', {tblId, cellIndex, lineNum});
                         ace.editor.ep_data_tables_last_clicked = null; // Clear shared state
                     }
                 } else {
