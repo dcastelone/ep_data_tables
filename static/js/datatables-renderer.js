@@ -218,23 +218,62 @@ const renderTimesliderTables = (root = document) => {
   return rendered;
 };
 
+const getVisibleTimesliderRevision = () => {
+  const label = document.querySelector('#revision_label')?.textContent || '';
+  const match = label.match(/\bVersion\s+(\d+)\b/i);
+  return match ? Number(match[1]) : null;
+};
+
+const getRequestedTimesliderRevision = () => {
+  const match = String(window.location.hash || '').match(/^#(\d+)$/);
+  return match ? Number(match[1]) : null;
+};
+
+const isTimesliderReadyToRender = () => {
+  const body = document.querySelector('#innerdocbody') || document.body;
+  if (!body || !body.querySelector('.ace-line')) return false;
+
+  const requestedRevision = getRequestedTimesliderRevision();
+  if (requestedRevision == null) return true;
+
+  const visibleRevision = getVisibleTimesliderRevision();
+  return visibleRevision === requestedRevision;
+};
+
 const startTimesliderRenderer = () => {
   if (typeof document === 'undefined' || !document.body || !document.body.classList?.contains('timeslider')) return;
-  renderTimesliderTables(document);
   const target = document.querySelector('#innerdocbody') || document.body;
   if (!target || target.__epDataTablesTimesliderObserver) return;
-  let scheduled = false;
+
+  let renderTimer = null;
   const schedule = () => {
-    if (scheduled) return;
-    scheduled = true;
-    setTimeout(() => {
-      scheduled = false;
+    clearTimeout(renderTimer);
+    renderTimer = setTimeout(() => {
+      renderTimer = null;
+      if (!isTimesliderReadyToRender()) {
+        schedule();
+        return;
+      }
       renderTimesliderTables(document);
+    }, 250);
+  };
+
+  const scheduleAfterSliderUpdate = () => {
+    setTimeout(() => {
+      schedule();
     }, 0);
   };
+
+  if (window.BroadcastSlider && typeof window.BroadcastSlider.onSlider === 'function') {
+    window.BroadcastSlider.onSlider(scheduleAfterSliderUpdate);
+  }
+  window.addEventListener('hashchange', scheduleAfterSliderUpdate);
+
   const observer = new MutationObserver(schedule);
   observer.observe(target, {childList: true, subtree: true});
   target.__epDataTablesTimesliderObserver = observer;
+
+  schedule();
 };
 
 if (typeof window !== 'undefined') {
