@@ -33,7 +33,13 @@ exports.eejsBlock_styles = (_hook, args) => {
   log('eejsBlock_styles: END');
 };
 
-/* Uncomment only if you truly need extra JS in the timeslider */
+exports.eejsBlock_timesliderStyles = (_hook, args) => {
+  log('eejsBlock_timesliderStyles: START');
+  args.content += '<link rel="stylesheet" href="/static/plugins/ep_data_tables/static/css/datatables-editor.css" type="text/css" />';
+  args.content += '<link rel="stylesheet" href="/static/plugins/ep_data_tables/static/css/caret.css" type="text/css" />';
+  log('eejsBlock_timesliderStyles: Appended table styles.');
+  log('eejsBlock_timesliderStyles: END');
+};
 
 exports.eejsBlock_timesliderScripts = (_hook, args) => {
   log('eejsBlock_timesliderScripts: START');

@@ -6,6 +6,8 @@
 		  "eejsBlock_styles"           : "ep_data_tables/static/js/index:eejsBlock_styles",
 		  "eejsBlock_scripts"          : "ep_data_tables/static/js/index:eejsBlock_scripts",
 		  "eejsBlock_editbarMenuLeft"  : "ep_data_tables/static/js/index:eejsBlock_editbarMenuLeft",
+		  "eejsBlock_timesliderStyles" : "ep_data_tables/static/js/index:eejsBlock_timesliderStyles",
+		  "eejsBlock_timesliderScripts": "ep_data_tables/static/js/index:eejsBlock_timesliderScripts",
       	  "collectContentPre"          : "ep_data_tables/collectContentPre:collectContentPre" 
 		},
   		"client_hooks": {
