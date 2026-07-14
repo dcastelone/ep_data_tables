@@ -1,5 +1,10 @@
 #table-menu-button button:before {
-  content: "\F0CE";
+  content: "";
+  width: 18px;
+  height: 18px;
+  background-color: currentColor;
+  -webkit-mask: url('../images/table.svg') center / contain no-repeat;
+  mask: url('../images/table.svg') center / contain no-repeat;
 }
 
 #table-context-menu {
@@ -105,10 +110,10 @@
 
 /* Button styling */
 #table-menu-button button {
-  background-repeat: no-repeat;
-  background-position: center;
+  width: 28px;
+  height: 28px;
 }
 
 .buttonicon-table {
-  background-image: url('../img/table.png');
+  background: none;
 }
