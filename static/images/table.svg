@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">
   <g fill="none" stroke="#000" stroke-linecap="round" stroke-linejoin="round" stroke-width="2.25">
-    <rect x="2.5" y="2.5" width="19" height="19" rx="1.5"/>
-    <path d="M2.5 8.83h19M2.5 15.17h19M8.83 2.5v19M15.17 2.5v19"/>
+    <rect x="2.5" y="3.5" width="19" height="17" rx="1.5"/>
+    <path d="M2.5 9.17h19M2.5 14.83h19M8.83 3.5v17M15.17 3.5v17"/>
   </g>
 </svg>

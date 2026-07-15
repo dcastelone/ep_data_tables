@@ -1,8 +1,6 @@
 /* ep_data_tables – datatables-renderer.js
  *
- * Only used by:
- *   • export pipeline           (`context === "export"`)
- *   • timeslider frame          (`context === "timeslider"`)
+ * Used by the timeslider frame (`context === "timeslider"`).
  * Regular pad rendering is done by client_hooks.js.
  */
 
@@ -44,54 +42,6 @@ const dec = (s) => {
     console.error('[ep_data_tables:datatables-renderer] Error decoding base64 string:', s, e);
   }
   return null;
-};
-
-// buildExportHtml now expects an array of pre-rendered HTML strings for each cell.
-const buildExportHtml = (metadata, richHtmlCellArray) => {
-  const funcName = 'buildExportHtml';
-  log(`${funcName}: START`, { metadata, numberOfCells: richHtmlCellArray.length });
-
-  if (!metadata || typeof metadata.tblId === 'undefined' || typeof metadata.row === 'undefined' || typeof metadata.cols !== 'number') {
-    log(`${funcName}: ERROR - Invalid or missing metadata. Metadata:`, metadata);
-    return `<div>Error: Missing table metadata for export.</div>`;
-  }
-
-  if (metadata.cols !== richHtmlCellArray.length) {
-    log(`${funcName}: WARN - Column count in metadata (${metadata.cols}) does not match provided HTML cell array length (${richHtmlCellArray.length}).`);
-    // Adjusting to render only the minimum of available cells or metadata.cols to prevent errors.
-    // Or, one might choose to pad with empty cells if segments are fewer.
-  }
-
-  // Get column widths from metadata, or use equal distribution if not set
-  const numCols = richHtmlCellArray.length;
-  const columnWidths = metadata.columnWidths || Array(numCols).fill(100 / numCols);
-  
-  // Ensure we have the right number of column widths
-  while (columnWidths.length < numCols) {
-    columnWidths.push(100 / numCols);
-  }
-  if (columnWidths.length > numCols) {
-    columnWidths.splice(numCols);
-  }
-
-  const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000;`;
-  const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
-
-  // Each item in richHtmlCellArray is now the complete inner HTML for a cell.
-  // Apply column widths to each cell
-  const cellsHtml = richHtmlCellArray.map((cellHtml, index) => {
-    const widthPercent = columnWidths[index] || (100 / numCols);
-    const cellStyle = `${tdStyle} width: ${widthPercent}%;`;
-    return `<td style="${cellStyle}">${cellHtml || '&nbsp;'}</td>`;
-  }).join('');
-
-  const tableHtml = 
-    `<table class="dataTable${firstRowClass}" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse:collapse; table-layout: fixed;">` +
-    `<tbody><tr>${cellsHtml}</tr></tbody>` +
-    `</table>`;
-  
-  log(`${funcName}: END - Generated HTML for export: ${tableHtml.substring(0,150)}...`);
-  return tableHtml;
 };
 
 const findTbljsonClass = (element) => {
@@ -360,34 +310,7 @@ if (typeof DatatablesRenderer === 'undefined') {
         render(ctx, el, metadataJsonString) { 
           log('render: START', { ctx, elContext: el, metadataJson: metadataJsonString });
 
-          if (ctx === 'export') {
-            log('render (export context): Processing for export.');
-            // el is now expected to be an object like { cellsRichHtml: ["<td>Cell1HTML</td>", ...] }
-            if (!el || !el.cellsRichHtml || !Array.isArray(el.cellsRichHtml)) {
-              log('render (export context): ERROR - el.cellsRichHtml is missing or not an array.', el);
-              return '<div>Error: Missing pre-rendered cell HTML for table export.</div>';
-            }
-            if (!metadataJsonString) {
-              log('render (export context): ERROR - metadataJsonString is undefined.');
-              return `<div>Error: Missing table metadata for export.</div>`;
-            }
-
-            let rowMetadata;
-            try {
-              rowMetadata = JSON.parse(metadataJsonString);
-              log('render (export context): Parsed rowMetadata:', rowMetadata);
-            } catch (e) {
-              log('render (export context): ERROR - Failed to parse metadata JSON:', metadataJsonString, e);
-              return `<div>Error: Invalid table metadata.</div>`;
-            }
-            
-            const exportHtml = buildExportHtml(rowMetadata, el.cellsRichHtml);
-            log('render (export context): Returning HTML string for export.');
-            return exportHtml;
-          }
-          
-          // Fallback to existing logic for other contexts (e.g., timeslider)
-          log(`render (context: ${ctx}): Using legacy/timeslider rendering path.`);
+          log(`render (context: ${ctx}): Using timeslider rendering path.`);
           if (!ctx || (ctx !== 'timeslider')) { 
             log('render: Skipping - Invalid context for legacy path:', ctx);
             return;
