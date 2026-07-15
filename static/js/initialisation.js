@@ -135,7 +135,7 @@ exports.postAceInit = (hook, ctx) => {
           $('#new-table-size-selector tr').eq(i).find('td').eq(j).addClass('selected');
         }
       }
-        const size = `${c + 1} X ${r + 1}`;
+        const size = `${c + 1} × ${r + 1}`;
         $sizeText.text(size);
     });
 
@@ -146,40 +146,58 @@ exports.postAceInit = (hook, ctx) => {
       e.stopPropagation();
       position($menu, $toolbarBtn, 0, $toolbarBtn.outerHeight());
       $menu.toggle();
-      $gridWrap.hide();
+      hideGridChooser();
       tableA11y.syncMenuState();
         // log('Toolbar Button Click: END - Toggled menu visibility:', $menu.is(':visible'));
     });
 
-    // "Insert table" hover reveals grid chooser
-    $('#tbl_prop_create_table').hover(
+    const $createTableButton = $('#tbl_prop_create_table');
+    const showGridChooser = () => {
+      position($gridWrap, $createTableButton, $createTableButton.outerWidth(), -12);
+      $gridWrap.show();
+      $createTableButton.attr('aria-expanded', 'true');
+    };
+    const hideGridChooser = () => {
+      $gridWrap.hide();
+      $createTableButton.attr('aria-expanded', 'false');
+    };
+
+    // "Insert table" hover or activation reveals the grid chooser.
+    $createTableButton.hover(
       function () {
-        position($gridWrap, $(this), $(this).outerWidth(), -12);
-        $gridWrap.show();
+        showGridChooser();
       },
         () => {
           setTimeout(() => {
             if (!$gridWrap.is(':hover')) {
-              $gridWrap.hide();
+              hideGridChooser();
             }
           }, 100);
         }
     );
+    $createTableButton.on('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showGridChooser();
+    });
+    $createTableButton.on('keydown', (e) => {
+      if (e.key === 'ArrowRight') showGridChooser();
+    });
 
     // keep grid visible while hovered
       $gridWrap.hover(
         () => { $gridWrap.show(); },
-        () => { $gridWrap.hide(); }
+        () => { hideGridChooser(); }
       );
 
     // selecting a size calls Ace helper then hides menus
     $gridCells.on('click', () => {
         // log('Grid Cell Click: START');
-      const [cols, rows] = $sizeText.text().split(' X ').map(n => parseInt(n, 10));
+      const [cols, rows] = $sizeText.text().split(/\s*[X×]\s*/).map(n => parseInt(n, 10));
         // log('Grid Cell Click: Parsed size:', { cols, rows });
       createTable(rows, cols);
       $menu.hide();
-      $gridWrap.hide();
+      hideGridChooser();
       tableA11y.syncMenuState();
         // log('Grid Cell Click: END - Hid menus.');
     });
@@ -202,19 +220,11 @@ exports.postAceInit = (hook, ctx) => {
           // log('Menu Item Click: END - Hid menu.');
       });
 
-    // manual close button
-    $('#tbl_prop_menu_hide').on('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      $menu.hide();
-      tableA11y.syncMenuState();
-    });
-
     // global click closes pop‑ups when clicking outside
     $(document).on('click', (e) => {
       if (!$(e.target).closest('#table-context-menu, #table-menu-button, #create-table-container').length) {
         $menu.hide();
-        $gridWrap.hide();
+        hideGridChooser();
         tableA11y.syncMenuState();
       }
     });

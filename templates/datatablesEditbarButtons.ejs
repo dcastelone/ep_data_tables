@@ -11,32 +11,37 @@
 </li>
 
 <!-- context menu -->
-<nav id="table-context-menu" class="table-context-menu" role="menu" aria-label="Table options">
-  <ul role="none">
-    <li class="menu-item" role="none">
-      <a id="tbl_prop_create_table" href="#create-table-container" role="menuitem" aria-haspopup="grid" aria-controls="create-table-container" data-l10n-id="ep_data_tables.menuCreateTable">Insert Table</a>
+<nav id="table-context-menu" class="table-context-menu" role="menu" aria-labelledby="table-menu-title">
+  <div id="table-menu-title" class="table-menu-title" role="presentation" data-l10n-id="ep_data_tables.menuTitle">Table</div>
+
+  <ul class="table-menu-section table-menu-create" role="none">
+    <li class="menu-item menu-item-create" role="none">
+      <a id="tbl_prop_create_table" href="#create-table-container" role="menuitem" aria-haspopup="grid" aria-controls="create-table-container" aria-expanded="false" data-l10n-id="ep_data_tables.menuCreateTable">Insert Table</a>
     </li>
   </ul>
 
-  <ul role="none">
+  <div class="table-menu-section-label" role="presentation" data-l10n-id="ep_data_tables.menuRows">Rows</div>
+  <ul class="table-menu-section" role="none">
     <li class="menu-item" role="none" data-action="addTblRowA"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertRowAbove">Insert Row Above</a></li>
     <li class="menu-item" role="none" data-action="addTblRowB"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertRowBelow">Insert Row Below</a></li>
+  </ul>
+
+  <div class="table-menu-section-label" role="presentation" data-l10n-id="ep_data_tables.menuColumns">Columns</div>
+  <ul class="table-menu-section" role="none">
     <li class="menu-item" role="none" data-action="addTblColL"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertColumnLeft">Insert Column Left</a></li>
     <li class="menu-item" role="none" data-action="addTblColR"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuInsertColumnRight">Insert Column Right</a></li>
   </ul>
 
-  <ul role="none">
+  <div class="table-menu-section-label" role="presentation" data-l10n-id="ep_data_tables.menuRemove">Remove</div>
+  <ul class="table-menu-section table-menu-danger" role="none">
     <li class="menu-item" role="none" data-action="delTblRow"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuDeleteRow">Delete Row</a></li>
     <li class="menu-item" role="none" data-action="delTblCol"><a href="#" role="menuitem" data-l10n-id="ep_data_tables.menuDeleteColumn">Delete Column</a></li>
   </ul>
 
-  <ul role="none">
-    <li class="menu-item" role="none"><a href="#" id="tbl_prop_menu_hide" role="menuitem" data-l10n-id="ep_data_tables.menuCloseThisMenu">Close Menu</a></li>
-  </ul>
-
   <!-- table-size chooser -->
   <div id="create-table-container" class="table-context-menu" role="group" aria-label="Choose table size">
-    <div id="new-table-size" aria-live="polite">1 X 1</div>
+    <div class="table-size-title" data-l10n-id="ep_data_tables.menuChooseSize">Choose table size</div>
+    <div id="new-table-size" aria-live="polite">1 × 1</div>
     <table id="new-table-size-selector" role="grid" aria-label="Table size">
       <tbody>
         <% for (let i = 1; i <= 30; i++) { %>

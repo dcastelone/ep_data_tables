@@ -50,6 +50,7 @@ const setupMenuAccessibility = ({$, menu, gridWrap, gridCells, sizeText, toolbar
   const closeMenus = () => {
     $menu.hide();
     $gridWrap.hide();
+    $menu.find('#tbl_prop_create_table').attr('aria-expanded', 'false');
     syncMenuState();
     $toolbarButton.find('button').trigger('focus');
   };
@@ -74,7 +75,7 @@ const setupMenuAccessibility = ({$, menu, gridWrap, gridCells, sizeText, toolbar
       items.eq((idx - 1 + items.length) % items.length).trigger('focus');
     } else if (evt.key === 'Enter' || evt.key === ' ') {
       evt.preventDefault();
-      $(evt.currentTarget).find('a,button').first().trigger('click');
+      $(evt.currentTarget).trigger('click');
     } else if (evt.key === 'ArrowRight' && evt.currentTarget.id === 'tbl_prop_create_table') {
       evt.preventDefault();
       $gridWrap.show();
@@ -102,7 +103,7 @@ const setupMenuAccessibility = ({$, menu, gridWrap, gridCells, sizeText, toolbar
       }
     }
     $cell.attr('tabindex', '0');
-    sizeText.text(`${col + 1} X ${row + 1}`);
+    sizeText.text(`${col + 1} × ${row + 1}`);
   };
 
   $gridCells.attr('role', 'gridcell').attr('aria-selected', 'false').attr('tabindex', '-1');
@@ -123,7 +124,7 @@ const setupMenuAccessibility = ({$, menu, gridWrap, gridCells, sizeText, toolbar
     }
     if (evt.key === 'Enter' || evt.key === ' ') {
       evt.preventDefault();
-      const [selectedCols, selectedRows] = sizeText.text().split(' X ').map((n) => parseInt(n, 10));
+      const [selectedCols, selectedRows] = sizeText.text().split(/\s*[X×]\s*/).map((n) => parseInt(n, 10));
       createTable(selectedRows, selectedCols);
       closeMenus();
       return;

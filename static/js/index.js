@@ -39,15 +39,15 @@ exports.eejsBlock_styles = (_hook, args) => {
 
 exports.eejsBlock_timesliderStyles = (_hook, args) => {
   log('eejsBlock_timesliderStyles: START');
-  args.content += '<link rel="stylesheet" href="/static/plugins/ep_data_tables/static/css/datatables-editor.css" type="text/css" />';
-  args.content += '<link rel="stylesheet" href="/static/plugins/ep_data_tables/static/css/caret.css" type="text/css" />';
+  args.content += '<link rel="stylesheet" href="../../static/plugins/ep_data_tables/static/css/datatables-editor.css" type="text/css" />';
+  args.content += '<link rel="stylesheet" href="../../static/plugins/ep_data_tables/static/css/caret.css" type="text/css" />';
   log('eejsBlock_timesliderStyles: Appended table styles.');
   log('eejsBlock_timesliderStyles: END');
 };
 
 exports.eejsBlock_timesliderScripts = (_hook, args) => {
   log('eejsBlock_timesliderScripts: START');
-  args.content +='<script src="/static/plugins/ep_data_tables/static/js/datatables-renderer.js"></script>';
+  args.content +='<script src="../../static/plugins/ep_data_tables/static/js/datatables-renderer.js"></script>';
   log('eejsBlock_timesliderScripts: Appended timesliderTag.');
   log('eejsBlock_timesliderScripts: END');
 };
