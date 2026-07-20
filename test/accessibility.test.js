@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const {enhanceTableMarkup, toDomElement} = require('../static/js/accessibility');
+const {enhanceTableMarkup, isEditableDocument, toDomElement} = require('../static/js/accessibility');
 
 const element = () => {
   const attributes = new Map();
@@ -29,7 +29,8 @@ test('adds table, cell, delimiter, and resize accessibility metadata', () => {
 
   enhanceTableMarkup(table, {row: 2});
   assert.equal(table.attributes.get('data-ep-data-tables-accessible'), 'true');
-  assert.equal(table.attributes.get('aria-label'), 'Table row 3');
+  assert.equal(table.attributes.get('aria-label'), 'Data table');
+  assert.equal(table.attributes.get('data-ep-data-tables-header-rows'), '1');
   assert.equal(cells[0].attributes.get('aria-colindex'), '1');
   assert.equal(cells[1].attributes.get('aria-colindex'), '2');
   assert.equal(delimiter.attributes.get('aria-hidden'), 'true');
@@ -39,4 +40,14 @@ test('adds table, cell, delimiter, and resize accessibility metadata', () => {
 test('is a safe no-op for malformed elements', () => {
   assert.doesNotThrow(() => enhanceTableMarkup(null));
   assert.doesNotThrow(() => enhanceTableMarkup({}));
+});
+
+test('recognizes editable ACE documents so deferred decoration can be prohibited', () => {
+  assert.equal(isEditableDocument({body: {isContentEditable: true}}), true);
+  assert.equal(isEditableDocument({body: {
+    isContentEditable: false,
+    getAttribute: (name) => name === 'contenteditable' ? 'true' : null,
+  }}), true);
+  assert.equal(isEditableDocument({body: {isContentEditable: false}, designMode: 'on'}), true);
+  assert.equal(isEditableDocument({body: {isContentEditable: false}, designMode: 'off'}), false);
 });

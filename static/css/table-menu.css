@@ -178,3 +178,89 @@
   border-color: #5b83b9;
   background: #cfe0f5;
 }
+
+.ep-data_tables-visually-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
+
+#table-properties-dialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  box-sizing: border-box;
+  padding: 20px;
+  overflow: auto;
+  color: #1f2937;
+  border: 1px solid #cbd3df;
+  border-radius: 8px;
+  background: #fff;
+}
+
+#table-properties-dialog::backdrop {
+  background: rgba(17, 24, 39, 0.45);
+}
+
+#table-properties-dialog h2 {
+  margin: 0 0 16px;
+  font-size: 18px;
+}
+
+#table-properties-dialog label:not(.table-properties-check),
+#table-properties-dialog legend {
+  display: block;
+  margin-bottom: 5px;
+  font-weight: 600;
+}
+
+#table-properties-caption {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 14px;
+}
+
+.table-properties-check {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 10px 0;
+}
+
+#table-properties-dialog fieldset {
+  margin: 16px 0;
+  padding: 12px;
+  border: 1px solid #d8dee8;
+}
+
+#table-properties-width-help {
+  margin: 0 0 10px;
+  color: #596579;
+  font-size: 12px;
+}
+
+#table-properties-widths {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(115px, 1fr));
+  gap: 10px;
+}
+
+#table-properties-widths input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+#table-properties-error {
+  color: #a93226;
+}
+
+.table-properties-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

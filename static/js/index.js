@@ -47,6 +47,8 @@ exports.eejsBlock_timesliderStyles = (_hook, args) => {
 
 exports.eejsBlock_timesliderScripts = (_hook, args) => {
   log('eejsBlock_timesliderScripts: START');
+  args.content +='<script src="../../static/plugins/ep_data_tables/static/js/table_model.js"></script>';
+  args.content +='<script src="../../static/plugins/ep_data_tables/static/js/accessibility.js"></script>';
   args.content +='<script src="../../static/plugins/ep_data_tables/static/js/datatables-renderer.js"></script>';
   log('eejsBlock_timesliderScripts: Appended timesliderTag.');
   log('eejsBlock_timesliderScripts: END');

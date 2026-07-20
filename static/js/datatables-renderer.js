@@ -11,26 +11,22 @@ const debugLog = (...m) => {
 const log = (...m) => debugLog('[ep_data_tables:datatables-renderer]', ...m);
 const DELIMITER = '\u241F';
 const HIDDEN_DELIM = DELIMITER;
-const enhanceTableHtml = (html, metadata = {}) => {
-  if (typeof document === 'undefined') return html;
-  const template = document.createElement('template');
-  template.innerHTML = html;
-  const table = template.content.querySelector('table.dataTable');
-  if (!table || typeof table.querySelectorAll !== 'function') return html;
-  table.setAttribute('data-ep-data-tables-accessible', 'true');
-  table.setAttribute('aria-label', `Table row ${(Number(metadata.row) || 0) + 1}`);
-  Array.from(table.querySelectorAll('td, th')).forEach((cell, index) => {
-    cell.setAttribute('aria-colindex', String(index + 1));
-  });
-  for (const delimiter of table.querySelectorAll('.ep-data_tables-delim, .ep-data_tables-caret-anchor')) {
-    delimiter.setAttribute('aria-hidden', 'true');
-  }
-  for (const handle of table.querySelectorAll('.ep-data_tables-resize-handle')) {
-    handle.setAttribute('aria-hidden', 'true');
-    handle.setAttribute('tabindex', '-1');
-  }
-  return template.innerHTML;
-};
+const tableModel = typeof window !== 'undefined' && window.epDataTablesTableModel
+  ? window.epDataTablesTableModel
+  : require('./table_model');
+const {
+  columnWidthsForRender,
+  headerColumnCount,
+  headerRowCount,
+} = tableModel;
+const {
+  enhanceTableHtml,
+  enhanceTableMarkup,
+  refreshLogicalTableAccessibility,
+} = typeof window !== 'undefined' && window.epDataTablesAccessibility
+  ? window.epDataTablesAccessibility
+  : require('./accessibility');
+const canonicalTimesliderLineHtml = new WeakMap();
 
 const enc = (s) => btoa(s).replace(/\+/g, '-').replace(/\//g, '_');
 const dec = (s) => {
@@ -69,9 +65,7 @@ const buildTimesliderHtml = (metadata, innerHTMLSegments) => {
   }
 
   const numCols = innerHTMLSegments.length;
-  const columnWidths = metadata.columnWidths || Array(numCols).fill(100 / numCols);
-  while (columnWidths.length < numCols) columnWidths.push(100 / numCols);
-  if (columnWidths.length > numCols) columnWidths.splice(numCols);
+  const columnWidths = columnWidthsForRender(metadata, numCols);
 
   let encodedTbljsonClass = '';
   try {
@@ -123,12 +117,16 @@ const buildTimesliderHtml = (metadata, innerHTMLSegments) => {
     } catch (_) {}
 
     const widthPercent = columnWidths[index] || (100 / numCols);
-    return `<td style="${tdBaseStyle} width: ${widthPercent}%;" data-column="${index}" draggable="false" autocorrect="off" autocapitalize="off" spellcheck="false">${modifiedSegment}</td>`;
+    const isColumnHeader = metadata.row < headerRowCount(metadata);
+    const isRowHeader = !isColumnHeader && index < headerColumnCount(metadata);
+    const cellTag = isColumnHeader || isRowHeader ? 'th' : 'td';
+    const scope = isColumnHeader ? ' scope="col"' : (isRowHeader ? ' scope="row"' : '');
+    return `<${cellTag}${scope} style="${tdBaseStyle} width: ${widthPercent}%;" data-column="${index}" draggable="false" autocorrect="off" autocapitalize="off" spellcheck="false">${modifiedSegment}</${cellTag}>`;
   }).join('');
 
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
   const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
-  return enhanceTableHtml(tableHtml, metadata);
+  return enhanceTableHtml(tableHtml, metadata, {logicalRefresh: false});
 };
 
 const renderTimesliderLine = (line) => {
@@ -161,7 +159,11 @@ const renderTimesliderLine = (line) => {
     .replace(/<br\s*\/?>/gi, ' ');
   const htmlSegments = sanitizedHTMLForSplit.split(DELIMITER);
 
+  canonicalTimesliderLineHtml.set(line, line.innerHTML);
   line.innerHTML = buildTimesliderHtml(metadata, htmlSegments);
+  enhanceTableMarkup(
+      line.querySelector('table.dataTable[data-tblId], table.dataTable[data-tblid]'), metadata,
+      {logicalRefresh: false});
   line.classList.remove('ep-data_tables-timeslider-pending');
   line.classList.add('ep-data_tables-timeslider-rendered');
   return true;
@@ -193,29 +195,50 @@ const renderTimesliderTables = (root = document) => {
   for (const line of body.querySelectorAll('.ace-line')) {
     if (renderTimesliderLine(line)) rendered++;
   }
-  if (rendered) log(`Rendered ${rendered} timeslider table row(s).`);
+  if (rendered) {
+    const logicalTableIds = new Set(Array.from(body.querySelectorAll(
+        'table.dataTable[data-tblId], table.dataTable[data-tblid]'))
+        .map((table) => table.getAttribute('data-tblId') || table.getAttribute('data-tblid'))
+        .filter(Boolean));
+    for (const logicalTableId of logicalTableIds) {
+      refreshLogicalTableAccessibility(body, logicalTableId);
+    }
+    log(`Rendered ${rendered} timeslider table row(s).`);
+  }
   return rendered;
 };
 
+const restoreCanonicalTimesliderLines = (root = document) => {
+  const body = root.querySelector ? (root.querySelector('#innerdocbody') || root) : root;
+  if (!body || typeof body.querySelectorAll !== 'function') return 0;
+  let restored = 0;
+  for (const line of body.querySelectorAll('.ace-line.ep-data_tables-timeslider-rendered')) {
+    const canonicalHtml = canonicalTimesliderLineHtml.get(line);
+    if (typeof canonicalHtml !== 'string') continue;
+    line.innerHTML = canonicalHtml;
+    canonicalTimesliderLineHtml.delete(line);
+    line.classList.remove('ep-data_tables-timeslider-rendered');
+    line.classList.add('ep-data_tables-timeslider-pending');
+    restored++;
+  }
+  return restored;
+};
+
 const getVisibleTimesliderRevision = () => {
+  const sliderRevision = window.BroadcastSlider?.getSliderPosition?.();
+  if (Number.isFinite(sliderRevision)) return Number(sliderRevision);
   const label = document.querySelector('#revision_label')?.textContent || '';
   const match = label.match(/\bVersion\s+(\d+)\b/i);
   return match ? Number(match[1]) : null;
 };
 
-const getRequestedTimesliderRevision = () => {
-  const match = String(window.location.hash || '').match(/^#(\d+)$/);
-  return match ? Number(match[1]) : null;
-};
-
-const isTimesliderReadyToRender = (requestedRevision = null) => {
+const isTimesliderReadyToRender = () => {
   const body = document.querySelector('#innerdocbody') || document.body;
   if (!body || !body.querySelector('.ace-line')) return false;
-
-  if (requestedRevision == null) return true;
-
   const visibleRevision = getVisibleTimesliderRevision();
-  return visibleRevision === requestedRevision;
+  const appliedRevision = Number(window.padContents?.currentRevision);
+  if (!Number.isFinite(visibleRevision) || !Number.isFinite(appliedRevision)) return true;
+  return visibleRevision === appliedRevision;
 };
 
 const startTimesliderRenderer = () => {
@@ -223,38 +246,34 @@ const startTimesliderRenderer = () => {
   const target = document.querySelector('#innerdocbody') || document.body;
   if (!target || target.__epDataTablesTimesliderObserver) return;
 
-  let initialRequestedRevision = getRequestedTimesliderRevision();
-  let waitingForInitialRevision = initialRequestedRevision != null;
-  let initialRetryTimer = null;
+  let readinessRetryTimer = null;
   let renderFrame = null;
-  const clearInitialWait = () => {
-    waitingForInitialRevision = false;
-    initialRequestedRevision = null;
-    clearTimeout(initialRetryTimer);
-    initialRetryTimer = null;
-  };
-  const scheduleInitialRetry = () => {
-    clearTimeout(initialRetryTimer);
-    initialRetryTimer = setTimeout(() => {
-      initialRetryTimer = null;
+  let observer = null;
+  const scheduleReadinessRetry = () => {
+    clearTimeout(readinessRetryTimer);
+    readinessRetryTimer = setTimeout(() => {
+      readinessRetryTimer = null;
       schedule();
-    }, 100);
+    }, 50);
   };
   const schedule = () => {
     if (renderFrame != null) return;
     const requestFrame = window.requestAnimationFrame || ((fn) => setTimeout(fn, 0));
     renderFrame = requestFrame(() => {
       renderFrame = null;
-      if (waitingForInitialRevision && getRequestedTimesliderRevision() !== initialRequestedRevision) {
-        clearInitialWait();
-      }
-      if (!isTimesliderReadyToRender(waitingForInitialRevision ? initialRequestedRevision : null)) {
-        if (waitingForInitialRevision) scheduleInitialRetry();
+      if (!isTimesliderReadyToRender()) {
+        scheduleReadinessRetry();
         return;
       }
-      markPendingTimesliderTables(document);
-      renderTimesliderTables(document);
-      clearInitialWait();
+      clearTimeout(readinessRetryTimer);
+      readinessRetryTimer = null;
+      observer?.disconnect();
+      try {
+        markPendingTimesliderTables(document);
+        renderTimesliderTables(document);
+      } finally {
+        observer?.observe(target, {childList: true, subtree: true});
+      }
     });
   };
 
@@ -264,17 +283,27 @@ const startTimesliderRenderer = () => {
     }, 0);
   };
 
-  if (window.BroadcastSlider && typeof window.BroadcastSlider.onSlider === 'function') {
-    window.BroadcastSlider.onSlider(scheduleAfterSliderUpdate);
-  }
-  window.addEventListener('hashchange', () => {
-    if (waitingForInitialRevision && getRequestedTimesliderRevision() !== initialRequestedRevision) {
-      clearInitialWait();
+  let sliderRegistrationAttempts = 0;
+  const registerSliderCallback = () => {
+    if (window.BroadcastSlider && typeof window.BroadcastSlider.onSlider === 'function') {
+      window.BroadcastSlider.onSlider(scheduleAfterSliderUpdate);
+      return;
     }
-    scheduleAfterSliderUpdate();
-  });
+    if (sliderRegistrationAttempts++ < 160) setTimeout(registerSliderCallback, 50);
+  };
+  registerSliderCallback();
+  window.addEventListener('hashchange', scheduleAfterSliderUpdate);
 
-  const observer = new MutationObserver(schedule);
+  window.epDataTablesBeforeTimesliderRevisionChange = () => {
+    restoreCanonicalTimesliderLines(document);
+    scheduleAfterSliderUpdate();
+  };
+  window.addEventListener('pagehide', () => {
+    clearTimeout(readinessRetryTimer);
+    delete window.epDataTablesBeforeTimesliderRevisionChange;
+  }, {once: true});
+
+  observer = new MutationObserver(schedule);
   observer.observe(target, {childList: true, subtree: true});
   target.__epDataTablesTimesliderObserver = observer;
 
@@ -359,5 +388,9 @@ if (typeof DatatablesRenderer === 'undefined') {
 if (typeof exports !== 'undefined') {
   log('Exporting DatatablesRenderer for Node.js');
   exports.DatatablesRenderer = DatatablesRenderer;
+  exports.buildTimesliderHtml = buildTimesliderHtml;
+  exports.findTbljsonEncodedMetadata = findTbljsonEncodedMetadata;
+  exports.renderTimesliderLine = renderTimesliderLine;
+  exports.restoreCanonicalTimesliderLines = restoreCanonicalTimesliderLines;
 }
   

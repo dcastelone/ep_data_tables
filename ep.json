@@ -18,6 +18,7 @@
 		  "acePostWriteDomLineHTML" 	: "ep_data_tables/static/js/client_hooks:acePostWriteDomLineHTML",
 		  "aceInitialized"              : "ep_data_tables/static/js/client_hooks:aceInitialized",
 		  "aceEditorCSS"                : "ep_data_tables/static/js/client_hooks:aceEditorCSS",
+		  "goToRevisionEvent"           : "ep_data_tables/static/js/timeslider_hooks:goToRevisionEvent",
   		  "postAceInit" 				: 	"ep_data_tables/static/js/initialisation:postAceInit"
 		}
 	  }

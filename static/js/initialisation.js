@@ -123,6 +123,20 @@ exports.postAceInit = (hook, ctx) => {
       toolbarButton: $toolbarBtn,
       createTable,
     });
+    const $status = $('#table-action-status');
+    const announce = (key, fallback) => {
+      let text = fallback;
+      try {
+        if (typeof html10n !== 'undefined' && html10n && typeof html10n.get === 'function') {
+          const translated = html10n.get(key);
+          if (translated && translated !== key) text = translated;
+        }
+      } catch (_) {
+        // Announcements must not block an editor operation.
+      }
+      $status.text('');
+      setTimeout(() => $status.text(text), 0);
+    };
 
     // grid hover: live update highlight & label
     $gridCells.hover(function () {
@@ -212,13 +226,112 @@ exports.postAceInit = (hook, ctx) => {
         e.stopPropagation();
         ctx.ace.callWithAce((ace) => {
             // log('Menu Item Click: Calling ace.ace_doDatatableOptions...', { action });
-          ace.ace_doDatatableOptions(action);
+          const changed = ace.ace_doDatatableOptions(action);
+          if (changed) announce('ep_data_tables.a11y.tableUpdated', 'Table updated.');
             // log('Menu Item Click: ace.ace_doDatatableOptions call finished.');
         }, 'tblOptions', true);
         $menu.hide();
         tableA11y.syncMenuState();
           // log('Menu Item Click: END - Hid menu.');
       });
+
+    const propertiesDialog = document.getElementById('table-properties-dialog');
+    const propertiesForm = document.getElementById('table-properties-form');
+    const captionInput = document.getElementById('table-properties-caption');
+    const headerRowInput = document.getElementById('table-properties-header-row');
+    const headerColumnInput = document.getElementById('table-properties-header-column');
+    const widthsContainer = document.getElementById('table-properties-widths');
+    const propertiesError = document.getElementById('table-properties-error');
+    const propertyTrigger = document.getElementById('tbl_prop_accessibility');
+
+    const closeProperties = () => {
+      if (propertiesDialog.open && typeof propertiesDialog.close === 'function') {
+        propertiesDialog.close();
+      } else {
+        propertiesDialog.removeAttribute('open');
+      }
+      propertyTrigger.focus();
+    };
+
+    const translatedColumn = (column) => {
+      try {
+        if (typeof html10n !== 'undefined' && html10n && typeof html10n.get === 'function') {
+          const translated = html10n.get('ep_data_tables.a11y.columnNumber', {column});
+          if (translated && translated !== 'ep_data_tables.a11y.columnNumber') return translated;
+        }
+      } catch (_) {}
+      return `Column ${column}`;
+    };
+
+    $(propertyTrigger).on('click', (event) => {
+      event.preventDefault();
+      let properties;
+      ctx.ace.callWithAce((ace) => {
+        properties = ace.ace_doDatatableOptions('getTableProperties');
+      }, 'tblGetProperties', true);
+      if (!properties) {
+        announce('ep_data_tables.a11y.selectTableFirst', 'Select a table cell first.');
+        return;
+      }
+
+      captionInput.value = properties.caption;
+      headerRowInput.checked = properties.headerRows === 1;
+      headerColumnInput.checked = properties.headerColumns === 1;
+      widthsContainer.replaceChildren();
+      properties.columnWidths.forEach((width, index) => {
+        const label = document.createElement('label');
+        label.textContent = translatedColumn(index + 1);
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.min = '1';
+        input.max = '99';
+        input.step = '0.1';
+        input.value = String(Number(Number(width).toFixed(4)));
+        input.dataset.column = String(index);
+        input.setAttribute('aria-describedby', 'table-properties-width-help');
+        label.appendChild(input);
+        widthsContainer.appendChild(label);
+      });
+      propertiesError.hidden = true;
+      $menu.hide();
+      tableA11y.syncMenuState();
+      if (typeof propertiesDialog.showModal === 'function') propertiesDialog.showModal();
+      else propertiesDialog.setAttribute('open', '');
+      captionInput.focus();
+    });
+
+    propertiesForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const columnWidths = Array.from(widthsContainer.querySelectorAll('input')).map(
+          (input) => Number(input.value));
+      if (!columnWidths.length || columnWidths.some((width) => !Number.isFinite(width) || width <= 0)) {
+        propertiesError.textContent = 'Enter a positive width for every column.';
+        propertiesError.hidden = false;
+        return;
+      }
+      let changed = false;
+      ctx.ace.callWithAce((ace) => {
+        changed = ace.ace_doDatatableOptions('setTableProperties', {
+          caption: captionInput.value,
+          headerRows: headerRowInput.checked ? 1 : 0,
+          headerColumns: headerColumnInput.checked ? 1 : 0,
+          columnWidths,
+        });
+      }, 'tblSetProperties', true);
+      if (!changed) {
+        propertiesError.textContent = 'The selected table could not be updated.';
+        propertiesError.hidden = false;
+        return;
+      }
+      closeProperties();
+      announce('ep_data_tables.a11y.propertiesSaved', 'Table properties saved.');
+    });
+
+    propertiesDialog.addEventListener('cancel', (event) => {
+      event.preventDefault();
+      closeProperties();
+    });
+    document.getElementById('table-properties-cancel').addEventListener('click', closeProperties);
 
     // global click closes pop‑ups when clicking outside
     $(document).on('click', (e) => {
@@ -262,7 +375,7 @@ exports.postAceInit = (hook, ctx) => {
             // log('postAceInit: Attempting to attach mousedown listener to $inner for cell selection...');
 
             // Mousedown on table TD elements
-            $inner.on('mousedown', 'table.dataTable td', function(evt) {
+            $inner.on('mousedown', 'table.dataTable td, table.dataTable th', function(evt) {
                 // log('[ep_data_tables mousedown] RAW MOUSE DOWN detected inside table.dataTable td.');
                 
                 // Check if the click is on an image or image-related element
@@ -287,7 +400,7 @@ exports.postAceInit = (hook, ctx) => {
 
                 if (tdElement.length && trElement.length && tableElement.length && lineDiv.length) {
                     const cellIndex = tdElement.index(); 
-                    const tblId = tableElement.attr('data-tblId');
+                    const tblId = tableElement.attr('data-tblId') || tableElement.attr('data-tblid');
                     const lineNum = _getLineNumberOfElement(lineDiv[0]);
 
                     if (tblId !== undefined && cellIndex !== -1 && lineNum !== -1) {

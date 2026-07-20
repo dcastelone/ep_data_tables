@@ -18,6 +18,9 @@
     <li class="menu-item menu-item-create" role="none">
       <a id="tbl_prop_create_table" href="#create-table-container" role="menuitem" aria-haspopup="grid" aria-controls="create-table-container" aria-expanded="false" data-l10n-id="ep_data_tables.menuCreateTable">Insert Table</a>
     </li>
+    <li class="menu-item" role="none">
+      <a id="tbl_prop_accessibility" href="#table-properties-dialog" role="menuitem" data-l10n-id="ep_data_tables.menuTableProperties">Table Properties</a>
+    </li>
   </ul>
 
   <div class="table-menu-section-label" role="presentation" data-l10n-id="ep_data_tables.menuRows">Rows</div>
@@ -55,3 +58,30 @@
     </table>
   </div>
 </nav>
+
+<dialog id="table-properties-dialog" aria-labelledby="table-properties-title">
+  <form method="dialog" id="table-properties-form">
+    <h2 id="table-properties-title" data-l10n-id="ep_data_tables.menuTableProperties">Table Properties</h2>
+    <label for="table-properties-caption" data-l10n-id="ep_data_tables.a11y.caption">Caption</label>
+    <input id="table-properties-caption" type="text" maxlength="240">
+    <label class="table-properties-check">
+      <input id="table-properties-header-row" type="checkbox">
+      <span data-l10n-id="ep_data_tables.a11y.firstRowHeaders">First row contains column headers</span>
+    </label>
+    <label class="table-properties-check">
+      <input id="table-properties-header-column" type="checkbox">
+      <span data-l10n-id="ep_data_tables.a11y.firstColumnHeaders">First column contains row headers</span>
+    </label>
+    <fieldset>
+      <legend data-l10n-id="ep_data_tables.a11y.columnWidths">Column widths (percent)</legend>
+      <p id="table-properties-width-help" data-l10n-id="ep_data_tables.a11y.columnWidthsHelp">Values are normalized to total 100 percent when saved.</p>
+      <div id="table-properties-widths"></div>
+    </fieldset>
+    <p id="table-properties-error" role="alert" hidden></p>
+    <div class="table-properties-actions">
+      <button id="table-properties-cancel" type="button" data-l10n-id="ep_data_tables.a11y.cancel">Cancel</button>
+      <button id="table-properties-save" type="submit" data-l10n-id="ep_data_tables.a11y.save">Save</button>
+    </div>
+  </form>
+</dialog>
+<div id="table-action-status" class="ep-data_tables-visually-hidden" role="status" aria-live="polite"></div>

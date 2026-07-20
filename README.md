@@ -79,3 +79,31 @@ There are probably 1000's of unnecessary lines of code in the plugin, I am plann
 
 Core `ep_data_tables` intentionally does not register Etherpad export hooks. For HTML/DOCX table export, use the independently implemented `ep_table_export` companion. Keeping export separate avoids a partial core renderer intercepting or breaking Etherpad's general export pipeline.
 
+## Accessibility and metadata compatibility
+
+Legacy tables continue to use their first row as column headers by default. The
+Table Properties dialog lets an author provide a caption, opt out of the header
+row, designate the first column as row headers, and enter column widths without
+using pointer-only resize handles. These settings are stored additively in the
+existing `tbljson` metadata as `caption`, `headerRows`, and `headerColumns`.
+
+Historical width arrays are rendered at their original precision and are never
+rewritten merely because a pad is opened. On an intentional metadata change,
+widths are normalized to a total of 100 percent with at most four decimal
+places. Unknown metadata fields are preserved so future and historical content
+can round-trip safely.
+
+The live editor keeps Etherpad's line-per-row DOM contract. Header intent uses
+`role="columnheader"` / `role="rowheader"` on the existing `<td>` elements, and
+data cells reference deterministic header-cell IDs with `aria-describedby`.
+These attributes are included synchronously in the initial line render. Never
+add or mutate accessibility nodes after an ACE line is attached: Etherpad will
+interpret those DOM mutations as edits and can persist spurious lines. The
+read-only timeslider can safely use native `<th>` elements and richer logical
+table decoration.
+
+`table_model.js` owns the pure metadata compatibility rules and
+`accessibility.js` owns read-only DOM accessibility and menu keyboard behavior;
+new work should prefer extending these tested modules over adding unrelated
+logic to `client_hooks.js`.
+

@@ -1,9 +1,9 @@
-.dataTable td[class*="author-"] { 
+.dataTable :is(td, th)[class*="author-"] {
   background-color: transparent !important; 
   border: 1px solid transparent; 
 }
 
-.dataTable td span[data-author-span="true"] { 
+.dataTable :is(td, th) span[data-author-span="true"] {
   display: inline; 
   text-decoration: none !important; 
 } 
@@ -26,7 +26,7 @@ height: 36px;
 min-height: 36px; 
 }
 
-.dataTable td {
+.dataTable :is(td, th) {
 vertical-align: top;
 white-space: normal;
 word-break: break-word;
@@ -35,26 +35,26 @@ border-left: 1px solid black;
 border-right: 1px solid black;
 }
 
-.dataTable td * {
+.dataTable :is(td, th) * {
 white-space: inherit;
 word-break: inherit;
 overflow-wrap: inherit;
 }
 
-.dataTable td:first-child {
+.dataTable :is(td, th):first-child {
 border-left: none;
 }
-.dataTable td:last-child {
+.dataTable :is(td, th):last-child {
 border-right: none;
 }
 
-.dataTable td.selected-table-cell {
+.dataTable :is(td, th).selected-table-cell {
 outline: 2px solid #1a73e8;
 outline-offset: -2px;
 box-shadow: inset 0 0 0 2px #fff;
 }
 
-.dataTable td:focus-visible,
+.dataTable :is(td, th):focus-visible,
 .ep-data_tables-resize-handle:focus-visible {
 outline: 2px solid #1a73e8;
 outline-offset: 2px;
@@ -97,7 +97,7 @@ transition: opacity 0.2s ease;
 }
 
 
-.dataTable tr:first-child td:hover .ep-data_tables-resize-handle,
+.dataTable tr:first-child :is(td, th):hover .ep-data_tables-resize-handle,
 .dataTable tr:first-child .ep-data_tables-resize-handle:hover {
 opacity: 0.3;
 background: #007cff;
@@ -111,7 +111,7 @@ user-select: none;
 pointer-events: none; 
 }
 
-.dataTable.ep-data_tables-resizing td {
+.dataTable.ep-data_tables-resizing :is(td, th) {
 transition: none !important;
 pointer-events: none;
 }
@@ -122,7 +122,7 @@ background: #007cff !important;
 pointer-events: auto; 
 }
 
-.dataTable.dataTable-first-row tr:first-child td {
+.dataTable.dataTable-first-row tr:first-child :is(td, th) {
 position: relative;
 }
 

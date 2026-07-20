@@ -1,5 +1,16 @@
 const ATTR_TABLE_JSON = 'tbljson';
 const {enhanceTableHtml} = require('./accessibility');
+const {
+  columnWidthsForRender,
+  equalColumnWidths,
+  headerColumnCount,
+  headerRowCount,
+  mergeCollectedMetadata,
+  metadataWithTableProperties,
+  normalizeColumnWidthsForWrite,
+  normalizeMetadataForWrite,
+  tablePropertiesForEditing,
+} = require('./table_model');
 const DEBUG = false;
 const debugLog = (...m) => {
   if (DEBUG) console.debug(...m);
@@ -561,14 +572,10 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
   }
 
   const numCols = innerHTMLSegments.length;
-  const columnWidths = metadata.columnWidths || Array(numCols).fill(100 / numCols);
-
-  while (columnWidths.length < numCols) {
-    columnWidths.push(100 / numCols);
-  }
-  if (columnWidths.length > numCols) {
-    columnWidths.splice(numCols);
-  }
+  const columnWidths = columnWidthsForRender(metadata, numCols);
+  const safeTableId = String(metadata.tblId || '').replace(/[^A-Za-z0-9_-]/g, '-');
+  const headerRows = headerRowCount(metadata);
+  const headerColumns = headerColumnCount(metadata);
 
   const tdStyle = `padding: 5px 7px; word-wrap:break-word; vertical-align: top; border: 1px solid #000; position: relative;`;
 
@@ -637,14 +644,26 @@ function buildTableFromDelimitedHTML(metadata, innerHTMLSegments) {
     const resizeHandle = !isLastColumn ? 
       `<div class="ep-data_tables-resize-handle" data-column="${index}" style="position: absolute; top: 0; right: -2px; width: 4px; height: 100%; cursor: col-resize; background: transparent; z-index: 10;"></div>` : '';
 
-    const tdContent = `<td style="${cellStyle}" data-column="${index}" draggable="false" autocorrect="off" autocapitalize="off" spellcheck="false">${modifiedSegment}${resizeHandle}</td>`;
-    return tdContent;
+    const isColumnHeader = metadata.row < headerRows;
+    const isRowHeader = !isColumnHeader && index < headerColumns;
+    const role = isColumnHeader ? ' role="columnheader"' : (isRowHeader ? ' role="rowheader"' : '');
+    const cellId = `ep-data-tables-cell-${safeTableId}-${metadata.row}-${index}`;
+    const descriptions = [];
+    if (!isColumnHeader && headerRows > 0) {
+      descriptions.push(`ep-data-tables-cell-${safeTableId}-0-${index}`);
+    }
+    if (!isColumnHeader && !isRowHeader && headerColumns > 0) {
+      descriptions.push(`ep-data-tables-cell-${safeTableId}-${metadata.row}-0`);
+    }
+    const describedBy = descriptions.length
+      ? ` aria-describedby="${descriptions.join(' ')}"` : '';
+    return `<td id="${cellId}"${role}${describedBy} style="${cellStyle}" data-column="${index}" draggable="false" autocorrect="off" autocapitalize="off" spellcheck="false">${modifiedSegment}${resizeHandle}</td>`;
   }).join('');
 
   const firstRowClass = metadata.row === 0 ? ' dataTable-first-row' : '';
 
   const tableHtml = `<table class="dataTable${firstRowClass}" writingsuggestions="false" autocorrect="off" autocapitalize="off" spellcheck="false" data-tblId="${metadata.tblId}" data-row="${metadata.row}" style="width:100%; border-collapse: collapse; table-layout: fixed;" draggable="false"><tbody><tr>${cellsHtml}</tr></tbody></table>`;
-  return enhanceTableHtml(tableHtml, metadata);
+  return enhanceTableHtml(tableHtml, metadata, {logicalRefresh: false});
 }
 
 // acePostWriteDomLineHTML: Render table from delimiter-separated text
@@ -858,7 +877,7 @@ exports.aceKeyEvent = (h, ctx) => {
           if (tableInDOM) {
             const domTblId = tableInDOM.getAttribute('data-tblId');
             const domRow = tableInDOM.getAttribute('data-row');
-            const domCells = tableInDOM.querySelectorAll('td');
+            const domCells = tableInDOM.querySelectorAll('td, th');
             if (domTblId && domRow !== null && domCells.length > 0) {
               const reconstructedMetadata = {
                 tblId: domTblId,
@@ -959,7 +978,7 @@ exports.aceKeyEvent = (h, ctx) => {
                 if (tableInDOM) {
                   const domTblId = tableInDOM.getAttribute('data-tblId');
                   const domRow = tableInDOM.getAttribute('data-row');
-                  const domCells = tableInDOM.querySelectorAll('td');
+                  const domCells = tableInDOM.querySelectorAll('td, th');
                   if (domTblId && domRow !== null && domCells.length > 0) {
                     const reconstructedMetadata = {
                       tblId: domTblId,
@@ -1664,7 +1683,7 @@ exports.aceInitialized = (h, ctx) => {
           const tableEl = lineNode.querySelector('table.dataTable');
           if (!tableEl) return extractedStyling;
           
-          const tds = tableEl.querySelectorAll('td');
+          const tds = tableEl.querySelectorAll('td, th');
           let totalSpansProcessed = 0;
           let totalSpansWithAttrs = 0;
           tds.forEach((td, cellIdx) => {
@@ -5090,7 +5109,7 @@ exports.aceInitialized = (h, ctx) => {
                     const domTblId = tableInDOM.getAttribute('data-tblId');
                     const domRow = tableInDOM.getAttribute('data-row');
                     if (domTblId === tblId && domRow !== null) {
-                      const domCells = tableInDOM.querySelectorAll('td');
+                      const domCells = tableInDOM.querySelectorAll('td, th');
                       if (domCells.length > 0) {
                         const columnWidths = [];
                         domCells.forEach(cell => {
@@ -5261,7 +5280,7 @@ exports.aceInitialized = (h, ctx) => {
           if (tableInDOM) {
             const domTblId = tableInDOM.getAttribute('data-tblId');
             if (domTblId === tblId) {
-              const domCells = tableInDOM.querySelectorAll('td');
+              const domCells = tableInDOM.querySelectorAll('td, th');
               if (domCells.length === numCols) {
                 columnWidths = [];
                 domCells.forEach(cell => {
@@ -5291,6 +5310,11 @@ exports.aceInitialized = (h, ctx) => {
       }
     }
 
+    finalMetadata = normalizeMetadataForWrite(finalMetadata, {
+      tblId,
+      row: rowIndex,
+      cols: numCols,
+    });
     const finalAttributeString = JSON.stringify(finalMetadata);
 
     try {
@@ -5377,7 +5401,7 @@ exports.aceInitialized = (h, ctx) => {
 
   };
 
-  ed.ace_doDatatableOptions = (action) => {
+  ed.ace_doDatatableOptions = (action, options = {}) => {
     const funcName = 'ace_doDatatableOptions';
 
     const editor = ed.ep_data_tables_editor;
@@ -5430,7 +5454,7 @@ exports.aceInitialized = (h, ctx) => {
                 const domTblId = tableInDOM.getAttribute('data-tblId');
                 const domRow = tableInDOM.getAttribute('data-row');
                 if (domTblId && domRow !== null) {
-                  const domCells = tableInDOM.querySelectorAll('td');
+                  const domCells = tableInDOM.querySelectorAll('td, th');
                   if (domCells.length > 0) {
                     const reconstructedMetadata = {
                       tblId: domTblId,
@@ -5544,6 +5568,9 @@ exports.aceInitialized = (h, ctx) => {
 
       const targetColIndex = lastClick.cellIndex || 0;
 
+      if (action === 'getTableProperties') {
+        return tablePropertiesForEditing(tableLines[0].metadata, numCols, numRows);
+      }
 
       let newNumCols = numCols;
       let success = false;
@@ -5584,6 +5611,22 @@ exports.aceInitialized = (h, ctx) => {
           success = deleteTableColumnWithText(tableLines, targetColIndex, ed, docManager);
           break;
 
+        case 'setTableProperties': {
+          for (const tableLine of tableLines) {
+            const newMetadata = metadataWithTableProperties(tableLine.metadata, options, {
+              tblId: tableLine.metadata.tblId,
+              row: tableLine.metadata.row,
+              cols: numCols,
+            });
+            applyTableLineMetadataAttribute(
+                tableLine.lineIndex, newMetadata.tblId, newMetadata.row, numCols,
+                ed.ace_getRep(), ed, JSON.stringify(newMetadata), docManager);
+          }
+          ed.ace_fastIncorp(10);
+          success = true;
+          break;
+        }
+
         default:
           return;
       }
@@ -5592,6 +5635,8 @@ exports.aceInitialized = (h, ctx) => {
         console.error(`[ep_data_tables] ${funcName}: Table operation failed for action: ${action}`);
         return;
       }
+
+      return true;
 
 
     } catch (error) {
@@ -5631,7 +5676,7 @@ exports.aceInitialized = (h, ctx) => {
           if (lineEntry && lineEntry.lineNode) {
             const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tblId}"]`);
             if (tableInDOM) {
-              const domCells = tableInDOM.querySelectorAll('td');
+              const domCells = tableInDOM.querySelectorAll('td, th');
               if (domCells.length === numCols) {
                 columnWidths = [];
                 domCells.forEach(cell => {
@@ -5659,7 +5704,13 @@ exports.aceInitialized = (h, ctx) => {
         applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
 
-      const newMetadata = { tblId, row: targetLine.metadata.row, cols: numCols, columnWidths };
+      const newMetadata = {
+        ...targetLine.metadata,
+        tblId,
+        row: targetLine.metadata.row,
+        cols: numCols,
+        columnWidths,
+      };
       applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
 
       editorInfo.ace_fastIncorp(10);
@@ -5702,7 +5753,7 @@ exports.aceInitialized = (h, ctx) => {
           if (lineEntry && lineEntry.lineNode) {
             const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${tblId}"]`);
             if (tableInDOM) {
-              const domCells = tableInDOM.querySelectorAll('td');
+              const domCells = tableInDOM.querySelectorAll('td, th');
               if (domCells.length === numCols) {
                 columnWidths = [];
                 domCells.forEach(cell => {
@@ -5730,7 +5781,13 @@ exports.aceInitialized = (h, ctx) => {
         applyTableLineMetadataAttribute(lineToUpdate, tblId, newRowIndex, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
       }
 
-      const newMetadata = { tblId, row: targetLine.metadata.row + 1, cols: numCols, columnWidths };
+      const newMetadata = {
+        ...targetLine.metadata,
+        tblId,
+        row: targetLine.metadata.row + 1,
+        cols: numCols,
+        columnWidths,
+      };
       applyTableLineMetadataAttribute(insertLineIndex, tblId, targetLine.metadata.row + 1, numCols, editorInfo.ace_getRep(), editorInfo, JSON.stringify(newMetadata), docManager);
 
       editorInfo.ace_fastIncorp(10);
@@ -5748,8 +5805,7 @@ exports.aceInitialized = (h, ctx) => {
       // First, update metadata for ALL rows BEFORE modifying content
       // This prevents postWriteCanonicalize from seeing stale column counts
       const newColCount = tableLines[0].cols + 1;
-      const equalWidth = 100 / newColCount;
-      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      const normalizedWidths = equalColumnWidths(newColCount);
       
       for (const tableLine of tableLines) {
         const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
@@ -5829,8 +5885,7 @@ exports.aceInitialized = (h, ctx) => {
       // First, update metadata for ALL rows BEFORE modifying content
       // This prevents postWriteCanonicalize from seeing stale column counts
       const newColCount = tableLines[0].cols + 1;
-      const equalWidth = 100 / newColCount;
-      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      const normalizedWidths = equalColumnWidths(newColCount);
       
       for (const tableLine of tableLines) {
         const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
@@ -5931,7 +5986,7 @@ exports.aceInitialized = (h, ctx) => {
               if (lineEntry && lineEntry.lineNode) {
                 const tableInDOM = lineEntry.lineNode.querySelector(`table.dataTable[data-tblId="${targetLine.metadata.tblId}"]`);
                 if (tableInDOM) {
-                  const domCells = tableInDOM.querySelectorAll('td');
+                  const domCells = tableInDOM.querySelectorAll('td, th');
                   if (domCells.length === targetLine.metadata.cols) {
                     columnWidths = [];
                     domCells.forEach(cell => {
@@ -5981,8 +6036,7 @@ exports.aceInitialized = (h, ctx) => {
       
       // First, update metadata for ALL rows BEFORE modifying content
       // This prevents postWriteCanonicalize from seeing stale column counts
-      const equalWidth = 100 / newColCount;
-      const normalizedWidths = Array(newColCount).fill(equalWidth);
+      const normalizedWidths = equalColumnWidths(newColCount);
       
       for (const tableLine of tableLines) {
         const newMetadata = { ...tableLine.metadata, cols: newColCount, columnWidths: normalizedWidths };
@@ -6247,7 +6301,18 @@ exports.collectContentLineText = (hookName, context) => {
     const tblId = table.getAttribute('data-tblId') || table.getAttribute('data-tblid') || '';
     const rowStr = table.getAttribute('data-row');
     const row = rowStr != null ? parseInt(rowStr, 10) : 0;
-    const meta = { tblId, row, cols: cells.length };
+    let existingMetadata = null;
+    const metadataElement = findTbljsonElement(table);
+    if (metadataElement && metadataElement.classList) {
+      for (const className of metadataElement.classList) {
+        if (!className.startsWith(ATTR_CLASS_PREFIX)) continue;
+        try {
+          existingMetadata = JSON.parse(dec(className.substring(ATTR_CLASS_PREFIX.length)));
+        } catch (_) {}
+        break;
+      }
+    }
+    const meta = mergeCollectedMetadata(existingMetadata, {tblId, row, cols: cells.length});
     try { cc && cc.doAttrib && state && cc.doAttrib(state, `${ATTR_TABLE_JSON}::${JSON.stringify(meta)}`); } catch (_) {}
   } catch (_) {
     // swallow collection-time errors to avoid breaking contentcollector
@@ -6266,7 +6331,7 @@ const startColumnResize = (table, columnIndex, startX, metadata, lineNum) => {
   resizeLineNum = lineNum;
 
   const numCols = metadata.cols;
-  resizeOriginalWidths = metadata.columnWidths ? [...metadata.columnWidths] : Array(numCols).fill(100 / numCols);
+  resizeOriginalWidths = columnWidthsForRender(metadata, numCols);
 
 
   createResizeOverlay(table, columnIndex);
@@ -6362,7 +6427,7 @@ const createResizeOverlay = (table, columnIndex) => {
   const finalOverlayTop = overlayTopOuter + outerPaddingTop + MANUAL_OFFSET_TOP;
   const finalOverlayLeft = overlayLeftOuter + outerPaddingLeft + MANUAL_OFFSET_LEFT;
 
-  const tds = table.querySelectorAll('td');
+  const tds = table.querySelectorAll('td, th');
   const tds_array = Array.from(tds);
   let linePosition = 0;
 
@@ -6438,7 +6503,7 @@ const updateColumnResize = (currentX) => {
     if (resizeLine) {
       const newColumnWidth = (newWidths[currentColumn] / 100) * tableRect.width;
 
-      const tds = firstTableRow.querySelectorAll('td');
+      const tds = firstTableRow.querySelectorAll('td, th');
       const tds_array = Array.from(tds);
 
       if (currentColumn < tds_array.length) {
@@ -6478,12 +6543,7 @@ const finishColumnResize = (editorInfo, docManager) => {
 
   }
 
-  const totalWidth = finalWidths.reduce((sum, width) => sum + width, 0);
-  if (totalWidth > 0) {
-    finalWidths.forEach((width, index) => {
-      finalWidths[index] = (width / totalWidth) * 100;
-    });
-  }
+  const normalizedFinalWidths = normalizeColumnWidthsForWrite(finalWidths, finalWidths.length);
 
 
   if (resizeOverlay) {
@@ -6536,7 +6596,7 @@ const finishColumnResize = (editorInfo, docManager) => {
                 const domTblId = tableInDOM.getAttribute('data-tblId');
                 const domRow = tableInDOM.getAttribute('data-row');
                 if (domTblId === resizeTableMetadata.tblId && domRow !== null) {
-                  const domCells = tableInDOM.querySelectorAll('td');
+                  const domCells = tableInDOM.querySelectorAll('td, th');
                   if (domCells.length > 0) {
                     const columnWidths = [];
                     domCells.forEach(cell => {
@@ -6609,7 +6669,8 @@ const finishColumnResize = (editorInfo, docManager) => {
 
 
       for (const tableLine of tableLines) {
-        const updatedMetadata = { ...tableLine.metadata, columnWidths: finalWidths };
+        const updatedMetadata = normalizeMetadataForWrite(
+            {...tableLine.metadata, columnWidths: normalizedFinalWidths});
         const updatedMetadataString = JSON.stringify(updatedMetadata);
 
         const lineEntry = rep.lines.atIndex(tableLine.lineIndex);
@@ -6698,4 +6759,3 @@ exports.aceUndoRedo = (hook, ctx) => {
     console.error(`${logPrefix} Error during undo/redo validation:`, e);
   }
 };
-

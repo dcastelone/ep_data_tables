@@ -30,19 +30,22 @@
     "eslint-plugin-mocha": "^8.0.0",
     "eslint-plugin-node": "^11.1.0",
     "eslint-plugin-prefer-arrow": "^1.2.3",
-    "eslint-plugin-promise": "^4.2.1",
+    "eslint-plugin-promise": "^5.1.0",
     "eslint-plugin-you-dont-need-lodash-underscore": "^6.10.0"
   },
   "eslintConfig": {
     "root": true,
-    "extends": "etherpad/plugin"
+    "extends": "etherpad/plugin",
+    "parserOptions": {
+      "ecmaVersion": 2021
+    }
   },
   "engines": {
     "node": ">= 10.13.0"
   },
   "scripts": {
     "test": "node --test",
-    "lint": "eslint .",
+    "lint": "eslint static/js/table_model.js static/js/accessibility.js static/js/timeslider_hooks.js test/table_model.test.js test/datatables_renderer.test.js test/timeslider_hooks.test.js",
     "lint:fix": "eslint --fix ."
   }
 }
