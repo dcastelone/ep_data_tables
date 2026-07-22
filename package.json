@@ -28,7 +28,7 @@
     "ep_etherpad-lite": ">=3.3.2 <4"
   },
   "devDependencies": {
-    "eslint": "8.57.1",
+    "eslint": "10.7.0",
     "eslint-config-etherpad": "4.0.5",
     "socket": "1.1.143",
     "typescript": "5.9.3"
