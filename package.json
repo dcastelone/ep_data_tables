@@ -31,7 +31,7 @@
     "eslint": "8.57.1",
     "eslint-config-etherpad": "4.0.5",
     "socket": "1.1.143",
-    "typescript": "5.9.3"
+    "typescript": "7.0.2"
   },
   "eslintConfig": {
     "root": true,
