@@ -223,7 +223,7 @@
   };
 
   const setupMenuAccessibility = (
-      {$, menu, gridWrap, gridCells, sizeText, toolbarButton, createTable}) => {
+    {$, menu, gridWrap, gridCells, sizeText, toolbarButton, createTable}) => {
     const $menu = $(menu);
     const $gridWrap = $(gridWrap);
     const $gridCells = $(gridCells);

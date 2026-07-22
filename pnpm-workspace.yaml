@@ -1,0 +1,16 @@
+autoInstallPeers: false
+minimumReleaseAge: 10080
+minimumReleaseAgeIgnoreMissingTime: false
+minimumReleaseAgeStrict: true
+trustPolicy: no-downgrade
+trustPolicyIgnoreAfter: 1051200
+trustLockfile: false
+blockExoticSubdeps: true
+ignoreScripts: true
+engineStrict: true
+nodeVersion: 20.20.0
+packageManagerStrictVersion: true
+verifyDepsBeforeRun: error
+verifyStoreIntegrity: true
+strictStorePkgContentCheck: true
+savePrefix: ''
