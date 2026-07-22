@@ -51,6 +51,7 @@ Legacy tables treat the first row as column headers by default. Live-editor cell
 - Merged cells are not supported.
 - Copying complete table structures between pads is not supported.
 - Very large tables can be expensive because Etherpad renders each row through its collaborative line model.
+- Mobile autocorrect, predictive text, dictation, handwriting input, IMEs, writing-assistance extensions, and other unusual text-entry paths may bypass the editor's input guards and split or otherwise disrupt a table row. Disable those features while editing tables if problems occur.
 
 ## Export support
 
