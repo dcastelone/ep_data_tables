@@ -6,6 +6,11 @@ trustPolicy: no-downgrade
 trustPolicyIgnoreAfter: 1051200
 trustLockfile: false
 blockExoticSubdeps: true
+# Temporary exception for legacy minimatch tooling paths that do not receive
+# untrusted brace patterns. Remove during the next dependency-update interval.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-mh99-v99m-4gvg
 ignoreScripts: true
 engineStrict: true
 nodeVersion: 20.20.0
