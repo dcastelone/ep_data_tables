@@ -1292,7 +1292,8 @@ exports.aceKeyEvent = (h, ctx) => {
   }
 
   if (isTypingKey || isInternalBackspace || isInternalDelete) {
-    if (isTypingKey && relativeCaretPos === 0 && targetCellIndex > 0) {
+    // Empty cells have no stored padding character to skip.
+    if (isTypingKey && relativeCaretPos === 0 && targetCellIndex > 0 && currentCellTextLength > 0) {
       const safePosAbs = cellStartCol + 1;
       editorInfo.ace_performSelectionChange([currentLineNum, safePosAbs], [currentLineNum, safePosAbs], false);
       editorInfo.ace_updateBrowserSelectionFromRep();
